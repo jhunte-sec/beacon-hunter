@@ -22,8 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from beacon_hunter.html_report import FLEET  # noqa: E402
 from beacon_hunter.report import destination  # noqa: E402
-from beacon_hunter.scoring import Settings, analyze  # noqa: E402
+from beacon_hunter.scoring import ON_A_TIMER, Settings, analyze  # noqa: E402
 from beacon_hunter.zeek import Conn  # noqa: E402
 
 
@@ -73,8 +74,13 @@ def key(f):
 
 
 def report_order(findings):
-    """The order the HTML report presents: unknown services before known timer services."""
+    """Unknown services before known timer services, as the HTML report lists them."""
     return sorted(findings, key=lambda f: (f.service_hint is not None, -f.score))
+
+
+def worth_a_look(findings):
+    """Exactly the HTML report's "Worth a look" section, in its order."""
+    return report_order([f for f in findings if f.timing >= ON_A_TIMER and f.timer_hosts < FLEET])
 
 
 def best_rank(order, labels):
@@ -97,12 +103,15 @@ def main() -> int:
         runs.append((name, conns, labels, full, plain))
 
     print("| scenario | family | connections | pairs scored | C&C pairs | C&C pairs scorable | "
-          "best C&C rank by score | best C&C rank in report order |")
-    print("|---|---|---|---|---|---|---|---|")
+          "best C&C rank by raw score | C&C called a timer | place in \"worth a look\" |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for name, conns, labels, full, _ in runs:
         scorable = sum(key(f) in labels for f in full)
+        timers = sum(key(f) in labels and f.timing >= ON_A_TIMER for f in full)
+        look = worth_a_look(full)
         print(f"| {name} | {FAMILY.get(name, '?')} | {len(conns):,} | {len(full)} | {len(labels)} | {scorable} | "
-              f"{best_rank(full, labels)} | {best_rank(report_order(full), labels)} |")
+              f"{best_rank(full, labels)} | {timers} of {scorable} | "
+              f"{best_rank(look, labels)}{f' of {len(look)}' if timers else ''} |")
 
     print()
     print("| scenario | C&C destination | connections | timing, plain | timing, beacon-hunter | what the report says |")

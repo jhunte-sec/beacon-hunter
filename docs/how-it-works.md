@@ -12,7 +12,7 @@ Two measurements, both chosen because a few odd gaps (a laptop going to sleep, a
   - A perfect 60-second timer: every gap is 60, MAD is 0, regularity is **1.0**.
   - 60 seconds with ±20% random jitter: gaps spread evenly between 48 and 72. Half of them sit within 6 s of 60, so MAD is about 6 and regularity is `1 - 6/60` = **0.9**.
   - Random human-like traffic (exponential gaps): MAD is about 0.69 of the median, so regularity is about **0.31**.
-- **Symmetry** = `1 - |Bowley skew|`. Bowley skew compares the quartiles: `(Q3 + Q1 - 2·Q2) / (Q3 - Q1)`. Jitter added by an implant is usually symmetric around the interval (skew near 0). Random traffic has a long tail of big gaps (skew around 0.26).
+- **Symmetry** = `1 - |Bowley skew|`. Bowley skew compares the quartiles: `(Q3 + Q1 - 2·Q2) / (Q3 - Q1)`. Jitter added by an implant is usually symmetric around the interval (skew near 0). Random traffic has a long tail of big gaps (skew around 0.26). On a near-perfect timer the quartiles sit milliseconds apart and their skew is rounding noise, so the penalty is phased in as the middle half of the gaps widens, reaching full weight at 10% of the median.
 
 `timing = 0.7 × regularity + 0.3 × symmetry`
 
@@ -31,6 +31,15 @@ Real beacons miss beats: a laptop sleeps, a packet drops. A 60-second timer then
 The higher of the plain and folded scores wins. The report then says roughly what share of expected check-ins was missing.
 
 Why this doesn't flag random traffic: random gaps rarely land near whole multiples of anything, so few of them fold and the multiplier keeps the score down. In the simulation study (docs/evaluation.md) it raised detection of beacons with 30% missed check-ins from under 10% to 78 to 100%, and added zero false positives across 1,500 non-beacon trials. `--no-fold` turns it off.
+
+### Repeating cycles are found as a whole
+
+Some implants don't wait a fixed time; they repeat a fixed *sequence*. Hakai's C2 in the IoT-23 captures waits 7.2, 8.5, 16.6 and 47.9 seconds, then starts over, 1,027 times. Each gap on its own looks scattered (timing 0.65), but two things give it away:
+
+- **Every gap matches the one k places later.** Compare each gap with the gap 2, 3, ... 6 places further on. For a cycle of k steps, they match: the median relative difference is close to 0. Random gaps don't match their neighbours at any distance (for random traffic the median relative difference is around 0.5 to 0.67).
+- **Every k-th connection lands a constant time after the last.** The sum of k consecutive gaps is the cycle length, 80 s for Hakai, and those sums are as regular as an ordinary timer.
+
+beacon-hunter needs the first test to pass (median relative difference ≤ 0.15) before it scores the k-step sums as the timer. The order matters: sums of random gaps also get smoother as k grows, so scoring the sums on their own would flag random traffic. The recurrence test doesn't have that problem. A cycle is only claimed with at least 30 gaps, a pattern that genuinely varies (the longest step at least 1.3× the shortest), and a cycle steady enough to score as a timer. The report then spells it out: "repeats a 4-connection cycle every 1m20s (waits 7s, 8s, 17s, 48s, then starts over)". `--no-cycles` turns it off.
 
 ## 2. Size: does each check-in send about the same amount?
 
@@ -65,6 +74,7 @@ This is what the allowlist is for. Building one for your own network is part of 
 ## What it will miss
 
 - **Beacons with very long sleeps.** Ten check-ins (the default `--min-events`) at a 6-hour interval needs more than two days of logs.
-- **Heavy jitter.** At ±50% jitter regularity drops to about 0.75. It still ranks above browsing, but the gap is smaller.
+- **Heavy jitter plus missed check-ins.** At ±30% jitter with 45% of check-ins missed, the multiples blur together and only about a fifth are recovered (see docs/evaluation.md).
 - **Domain fronting and shared infrastructure.** Grouping is by IP. A beacon to a big CDN shares its destination IP with legitimate traffic, which blurs the timing.
+- **One long-lived connection.** C2 that holds a session open instead of checking in is a single log line.
 - **Anything not in conn.log.** It sees timing and sizes only. No payloads, no TLS details, no DNS names.
