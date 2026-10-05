@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="persistence: split the capture into this many time slices (default 24)")
     p.add_argument("--no-port", action="store_true", help="group by host pair only, ignoring destination port")
     p.add_argument("--allowlist", help="file of destinations to ignore (see examples/allowlist.txt)")
+    p.add_argument("--no-fold", action="store_true",
+                   help="score gaps at face value instead of forgiving missed check-ins")
     p.add_argument("--include-multicast", action="store_true", help="also score multicast and broadcast destinations")
     p.add_argument("--json", action="store_true", help="print JSON instead of a table")
     p.add_argument("--explain", action="store_true", help="after the table, write out the reasons for each result")
@@ -45,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         slices=args.slices,
         by_port=not args.no_port,
         include_multicast=args.include_multicast,
+        fold=not args.no_fold,
     )
     if args.allowlist:
         try:
@@ -61,12 +64,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     findings = [f for f in findings if f.score >= args.min_score]
+
+    # The HTML report sorts everything into sections itself, so it gets the lot.
+    if args.html:
+        page = html_report.render(findings, args.logs, stats.rows, stats.skipped, settings)
+        Path(args.html).write_text(page, encoding="utf-8")
+
     if args.top > 0:
         findings = findings[: args.top]
-
-    if args.html:
-        page = html_report.render(findings, args.logs, stats.rows, stats.skipped)
-        Path(args.html).write_text(page, encoding="utf-8")
 
     if args.json:
         print(to_json(findings))

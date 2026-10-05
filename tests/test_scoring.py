@@ -146,3 +146,11 @@ def test_random_traffic_from_many_hosts_is_not_called_deployed_software():
     for f in analyze(conns):
         assert f.timer_hosts == 0
         assert not any("deployed software" in r for r in f.reasons)
+
+
+def test_known_timer_services_get_a_hint_but_keep_their_score():
+    ntp = [Conn(i * 1024.0, "10.0.0.5", "10.0.0.1", 123, "udp", 48) for i in range(40)]
+    f = analyze(ntp)[0]
+    assert f.service_hint == "NTP time sync"
+    assert f.score > 0.95
+    assert any("usually NTP time sync" in r and "confirm 10.0.0.1" in r for r in f.reasons)

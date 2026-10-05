@@ -27,6 +27,16 @@ WEIGHTS = {"timing": 0.5, "size": 0.2, "persistence": 0.3}
 
 ON_A_TIMER = 0.8        # timing score at which we call it a timer in the reasons
 
+# Services that run on a timer by design. A hint, never an exemption: malware
+# tunnels over DNS and NTP precisely because these ports look boring.
+KNOWN_TIMERS = {
+    (53, "udp"): "DNS", (53, "tcp"): "DNS",
+    (67, "udp"): "DHCP", (123, "udp"): "NTP time sync",
+    (161, "udp"): "SNMP polling", (514, "udp"): "syslog",
+    (1514, "tcp"): "the Wazuh agent", (1514, "udp"): "the Wazuh agent",
+    (9997, "tcp"): "the Splunk forwarder", (8220, "tcp"): "Elastic Agent (Fleet)",
+}
+
 # Folding missed check-ins back onto the timer (see fold_onto_period).
 MAX_MULTIPLE = 4        # a gap of up to 4 periods can be explained as missed beats
 MIN_GAPS_TO_FOLD = 8
@@ -39,6 +49,7 @@ class Settings:
     slices: int = 24            # persistence: split the capture into this many slices
     by_port: bool = True        # group by destination port as well as host
     include_multicast: bool = False
+    fold: bool = True           # forgive missed check-ins (see fold_onto_period)
     allow: list[allowlist.Entry] = field(default_factory=list)
 
 
@@ -73,6 +84,7 @@ class Finding:
     score: float
     hosts: int = 1              # sources with a scored pair to the same destination
     timer_hosts: int = 0        # of those, how many are on a timer
+    service_hint: Optional[str] = None
     reasons: list[str] = field(default_factory=list)
     timestamps: list[float] = field(default_factory=list, repr=False)
     capture_start: float = 0.0
@@ -166,10 +178,10 @@ def fold_onto_period(intervals: Sequence[float]) -> Optional[Timing]:
     )
 
 
-def analyze_timing(intervals: Sequence[float]) -> Timing:
+def analyze_timing(intervals: Sequence[float], fold: bool = True) -> Timing:
     m = median(intervals)
     plain = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None)
-    folded = fold_onto_period(intervals)
+    folded = fold_onto_period(intervals) if fold else None
     if folded is not None and folded.score > plain.score:
         return folded
     return plain
@@ -238,7 +250,7 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
         intervals = [b - a for a, b in zip(events, events[1:])]
         sizes = [c.orig_bytes for c in members if c.orig_bytes is not None]
 
-        timing = analyze_timing(intervals)
+        timing = analyze_timing(intervals, settings.fold)
         size = size_score(sizes, len(members))
         active = active_slices(events, start, end, settings.slices)
         persistence = active / settings.slices
@@ -263,6 +275,7 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
             timestamps=events,
             capture_start=start,
             capture_end=end,
+            service_hint=KNOWN_TIMERS.get((port, proto)) if port is not None else None,
         ))
 
     # How many sources reach the same destination, and how many on a timer? A
@@ -319,4 +332,8 @@ def explain(f: Finding) -> list[str]:
             reasons.append("no other host checks in here on a timer")
     elif f.hosts > 1:
         reasons.append(f"{f.hosts} hosts talk to this destination")
+
+    if f.service_hint:
+        reasons.append(f"{f.dport}/{f.proto} is usually {f.service_hint}, which runs on a timer by design; "
+                       f"confirm {f.dst} is a server you expect")
     return reasons
