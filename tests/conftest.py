@@ -41,7 +41,8 @@ def write_tsv(path, conns):
     for n, c in enumerate(conns):
         size = "-" if c.orig_bytes is None else str(c.orig_bytes)
         port = "-" if c.dport is None else str(c.dport)
-        lines.append("\t".join([f"{c.ts:.6f}", f"C{n}", c.src, "50000", c.dst, port, c.proto,
+        sport = str(c.sport) if c.sport is not None else str(49152 + n % 16000)  # fresh port, as real clients use
+        lines.append("\t".join([f"{c.ts:.6f}", f"C{n}", c.src, sport, c.dst, port, c.proto,
                                 "-", "0.1", size, "100", "SF"]))
     lines.append("#close\t2026-10-04-00-00-00")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

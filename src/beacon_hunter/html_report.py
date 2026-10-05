@@ -493,6 +493,11 @@ def what_it_means(f: Finding) -> str:
     if f.missed:
         text += (f" About {f.missed * 100:.0f}% of the expected check-ins never arrived, which is what a machine "
                  f"that sleeps or goes offline looks like, but the rest land right on the timer.")
+    if f.unanswered is not None and f.unanswered >= 0.9:
+        text += (" The server never answers, but the attempts keep coming on schedule. That's typical of "
+                 "malware whose command server has been taken down or sinkholed: it keeps calling anyway.")
+    if f.process:
+        text += f" The program making the connections is {f.process}."
     if f.service_hint:
         text += (f" {f.dport}/{f.proto} is normally {f.service_hint}, which runs on a timer by design, so this is "
                  f"probably fine if {f.dst} is a server you run or trust.")
@@ -513,10 +518,17 @@ def next_steps(f: Finding) -> str:
     else:
         identify = (f"Look up {_addr(f.dst)} in threat intel and passive DNS. Which name resolved to it? "
                     f"Check <span class=\"addr\">dns.log</span> from {_addr(f.src)} just before {escape(first)}.")
+    if f.process:
+        find_process = (f"Check {_addr(f.process)} on {_addr(f.src)}: is it where it should be, is it signed, and "
+                        f"what started it? Sysmon event ID 1 has its command line and parent process.")
+    else:
+        find_process = (f"Find the process on {_addr(f.src)} making the connection: EDR, Sysmon event ID 3, or "
+                        f"<span class=\"addr\">netstat -ano</span> at the next check-in (due every "
+                        f"{escape(human_duration(f.period))}).")
     return f"""
 <div class="next"><h4>Next steps</h4><ol>
   <li>{identify}</li>
-  <li>Find the process on {_addr(f.src)} making the connection: EDR, Sysmon event ID 3, or <span class="addr">netstat -ano</span> at the next check-in (due every {escape(human_duration(f.period))}).</li>
+  <li>{find_process}</li>
   <li>If it turns out to be legitimate software, add <span class="addr">{escape(allow_line)}</span> to your allowlist with a comment saying what it is.</li>
 </ol></div>"""
 

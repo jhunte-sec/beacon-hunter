@@ -9,9 +9,10 @@ from __future__ import annotations
 import gzip
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, TextIO
+
+from .timefmt import parse_time
 
 UNSET = {"-", "(empty)", ""}
 
@@ -21,6 +22,7 @@ FIELD_NAMES = {
     "src": ("id.orig_h", "id_orig_h"),
     "dst": ("id.resp_h", "id_resp_h"),
     "dport": ("id.resp_p", "id_resp_p"),
+    "sport": ("id.orig_p", "id_orig_p"),
 }
 
 
@@ -32,12 +34,16 @@ class Conn:
     dport: Optional[int]
     proto: str
     orig_bytes: Optional[int]
+    process: Optional[str] = None   # only sources that know it (Sysmon) fill this in
+    sport: Optional[int] = None     # the originator's port: retries of one connection share it
+    answered: Optional[bool] = None # did the other side reply at all? None when the log doesn't say
 
 
 @dataclass
 class ReadStats:
-    rows: int = 0
-    skipped: int = 0
+    rows: int = 0        # connection records read (or rebuilt, for packet captures)
+    skipped: int = 0     # records that couldn't be used
+    packets: int = 0     # packets read, for packet captures
 
 
 def read_conn_logs(paths: Iterable[str | Path], stats: Optional[ReadStats] = None) -> Iterator[Conn]:
@@ -133,21 +139,8 @@ def _to_int(value) -> Optional[int]:
         return None
 
 
-def _to_ts(value) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
 def _to_conn(row: dict) -> Optional[Conn]:
-    ts = _to_ts(_get(row, "ts"))
+    ts = parse_time(_get(row, "ts"))
     src = _get(row, "src")
     dst = _get(row, "dst")
     if ts is None or not src or not dst:
@@ -159,4 +152,14 @@ def _to_conn(row: dict) -> Optional[Conn]:
         dport=_to_int(_get(row, "dport")),
         proto=str(_get(row, "proto") or "?"),
         orig_bytes=_to_int(_get(row, "orig_bytes")),
+        sport=_to_int(_get(row, "sport")),
+        answered=_answered(_get(row, "conn_state")),
     )
+
+
+def _answered(state) -> Optional[bool]:
+    # S0: the originator's packets were the only ones seen. Every other state
+    # involves something coming back (a SYN-ACK, a reset, data).
+    if not state:
+        return None
+    return str(state) != "S0"

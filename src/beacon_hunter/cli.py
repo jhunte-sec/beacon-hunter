@@ -1,4 +1,4 @@
-"""Command line entry point: beacon-hunter conn.log [more logs...]"""
+"""Command line entry point: beacon-hunter LOG [more logs...]"""
 
 from __future__ import annotations
 
@@ -6,19 +6,25 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, allowlist
+from . import __version__, allowlist, csvlog
 from . import html_report
 from .report import explained, table, to_json
 from .scoring import Settings, analyze
-from .zeek import ReadStats, read_conn_logs
+from .sources import FORMATS, read_all
+from .zeek import ReadStats
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="beacon-hunter",
-        description="Rank host pairs in Zeek conn.log files by how much they look like C2 beaconing.",
+        description="Find machines that check in with the same server on a timer (C2 beaconing).",
+        epilog="Reads Zeek conn.log, Suricata eve.json, Sysmon network events (JSON, XML or .evtx), "
+               "CSV exports and pcap/pcapng captures. The format is detected from each file's content.",
     )
-    p.add_argument("logs", nargs="+", help="conn.log files (TSV or JSON, .gz is fine)")
+    p.add_argument("logs", nargs="+", help="log files or packet captures (.gz is fine)")
+    p.add_argument("--format", choices=FORMATS, default="auto", help="skip detection and read every file as this")
+    p.add_argument("--csv-map", metavar="MAP",
+                   help='CSV column names, e.g. "ts=Log Time,src=Client,dst=Server,dport=Port"')
     p.add_argument("--top", type=int, default=20, help="show this many results (default 20, 0 for all)")
     p.add_argument("--min-score", type=float, default=0.0, help="hide results below this score")
     p.add_argument("--min-events", type=int, default=10, help="check-ins needed before a pair is scored (default 10)")
@@ -28,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="persistence: split the capture into this many time slices (default 24)")
     p.add_argument("--no-port", action="store_true", help="group by host pair only, ignoring destination port")
     p.add_argument("--allowlist", help="file of destinations to ignore (see examples/allowlist.txt)")
+    p.add_argument("--no-retry-merge", action="store_true",
+                   help="count every log record, instead of counting retries of one TCP connection once")
     p.add_argument("--no-fold", action="store_true",
                    help="score gaps at face value instead of forgiving missed check-ins")
     p.add_argument("--no-cycles", action="store_true",
@@ -51,17 +59,14 @@ def main(argv: list[str] | None = None) -> int:
         include_multicast=args.include_multicast,
         fold=not args.no_fold,
         cycles=not args.no_cycles,
+        merge_retries=not args.no_retry_merge,
     )
-    if args.allowlist:
-        try:
-            settings.allow = allowlist.load(args.allowlist)
-        except (OSError, ValueError) as exc:
-            print(f"beacon-hunter: {exc}", file=sys.stderr)
-            return 2
-
-    stats = ReadStats()
     try:
-        findings = analyze(read_conn_logs(args.logs, stats), settings)
+        if args.allowlist:
+            settings.allow = allowlist.load(args.allowlist)
+        csv_map = csvlog.parse_map(args.csv_map)
+        stats = ReadStats()
+        findings = analyze(read_all(args.logs, args.format, stats, csv_map), settings)
     except (OSError, ValueError) as exc:
         print(f"beacon-hunter: {exc}", file=sys.stderr)
         return 2
@@ -85,7 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.html:
             print(f"\nHTML report written to {args.html}")
         sys.stdout.flush()
-        print(f"\n{stats.rows} connections read, {stats.skipped} skipped as malformed.", file=sys.stderr)
+        source = f" rebuilt from {stats.packets:,} packets" if stats.packets else " read"
+        print(f"\n{stats.rows:,} connections{source}, {stats.skipped:,} skipped as malformed.", file=sys.stderr)
     return 0
 
 

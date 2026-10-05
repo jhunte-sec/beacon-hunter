@@ -14,8 +14,9 @@ def test_reads_tsv_and_treats_dash_as_unset(tmp_path):
         Conn(2.5, "10.0.0.1", "10.0.0.2", 443, "tcp", None),
     ])
     conns = list(read_conn_log(path))
-    assert conns[0] == Conn(1.5, "10.0.0.1", "10.0.0.2", 443, "tcp", 120)
+    assert conns[0] == Conn(1.5, "10.0.0.1", "10.0.0.2", 443, "tcp", 120, sport=49152, answered=True)
     assert conns[1].orig_bytes is None
+    assert conns[1].sport == 49153
 
 
 def test_reads_json_with_dotted_or_flattened_names(tmp_path):

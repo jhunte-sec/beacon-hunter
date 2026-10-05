@@ -46,6 +46,10 @@ MAX_CYCLE = 6           # longest cycle looked for, in connections
 CYCLE_MATCH = 0.85      # how closely each gap must match the gap k places later
 MIN_GAPS_FOR_CYCLE = 30 # don't claim a pattern from a handful of connections
 
+# TCP records from the same source port this close together are one connection
+# being retried, not separate check-ins (see merge_retries).
+RETRY_WINDOW = 75.0
+
 
 @dataclass
 class Settings:
@@ -56,6 +60,7 @@ class Settings:
     include_multicast: bool = False
     fold: bool = True           # forgive missed check-ins (see fold_onto_period)
     cycles: bool = True         # look for repeating multi-step patterns (see find_cycle)
+    merge_retries: bool = True  # count TCP retries of one connection once (see merge_retries)
     allow: list[allowlist.Entry] = field(default_factory=list)
 
 
@@ -90,6 +95,9 @@ class Finding:
     size: Optional[float]
     persistence: float
     score: float
+    retries: int = 0            # log records that were retries of an earlier attempt
+    unanswered: Optional[float] = None  # share of attempts that got no reply, when the log says
+    process: Optional[str] = None  # the program making the connections, when the log says
     hosts: int = 1              # sources with a scored pair to the same destination
     timer_hosts: int = 0        # of those, how many are on a timer
     service_hint: Optional[str] = None
@@ -124,6 +132,30 @@ def regularity(values: Sequence[float]) -> float:
     if m <= 0:
         return 0.0
     return max(0.0, 1.0 - spread / m)
+
+
+def merge_retries(members: Sequence[Conn]) -> tuple[list[Conn], int]:
+    """Keep the first record of each TCP connection attempt; drop its retries.
+
+    When nobody answers a SYN, the operating system sends it again on the same
+    socket (Linux after 1, 3, 7, 15 and 31 seconds). Zeek starts a new log
+    record when an unanswered SYN is more than 5 seconds old, so one attempt
+    shows up as several "connections" from the same source port, and a plain
+    80-second beacon turns into gaps of 7, 8, 17 and 48 seconds. Records that
+    share a source port within RETRY_WINDOW of each other are that same
+    socket. TCP only: UDP clients such as NTP legitimately reuse one port for
+    every poll.
+    """
+    kept, retries, last_seen = [], 0, {}
+    for conn in sorted(members, key=lambda c: c.ts):
+        if conn.proto == "tcp" and conn.sport is not None:
+            previous = last_seen.get(conn.sport)
+            last_seen[conn.sport] = conn.ts
+            if previous is not None and conn.ts - previous <= RETRY_WINDOW:
+                retries += 1
+                continue
+        kept.append(conn)
+    return kept, retries
 
 
 def merge_events(timestamps: Sequence[float], window: float) -> list[float]:
@@ -308,10 +340,15 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
         if settings.allow and allowlist.is_allowed(settings.allow, conn.dst, conn.dport):
             continue
         port = conn.dport if settings.by_port else None
-        groups[(conn.src, conn.dst, port, conn.proto)].append(conn)
+        # When the log names the program (Sysmon), keep programs apart: malware and a
+        # browser talking to the same CDN address are different conversations.
+        groups[(conn.src, conn.dst, port, conn.proto, conn.process)].append(conn)
 
     findings = []
-    for (src, dst, port, proto), members in groups.items():
+    for (src, dst, port, proto, process), members in groups.items():
+        retries = 0
+        if settings.merge_retries:
+            members, retries = merge_retries(members)
         events = merge_events([c.ts for c in members], settings.merge_window)
         if len(events) < settings.min_events:
             continue
@@ -319,6 +356,8 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
         sizes = [c.orig_bytes for c in members if c.orig_bytes is not None]
 
         timing = analyze_timing(intervals, settings.fold, settings.cycles)
+        known = [c.answered for c in members if c.answered is not None]
+        unanswered = (known.count(False) / len(known)) if known else None
         size = size_score(sizes, len(members))
         active = active_slices(events, start, end, settings.slices)
         persistence = active / settings.slices
@@ -345,6 +384,9 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
             capture_start=start,
             capture_end=end,
             service_hint=KNOWN_TIMERS.get((port, proto)) if port is not None else None,
+            retries=retries,
+            process=process,
+            unanswered=unanswered,
         ))
 
     # How many sources reach the same destination, and how many on a timer? A
@@ -386,7 +428,24 @@ def explain(f: Finding) -> list[str]:
         line += f"; about {f.missed * 100:.0f}% of expected check-ins are missing, but the rest stay on the timer"
     reasons.append(line)
 
-    if f.same_size_share is not None and f.median_bytes is not None:
+    if f.process:
+        reasons.append(f"made by {f.process}")
+
+    dead = f.unanswered is not None and f.unanswered >= 0.9
+    if dead:
+        share = "any" if f.unanswered >= 0.995 else f"{f.unanswered * 100:.0f}%"
+        line = (f"the server never replied to {share} of {f.connections:,} attempts, "
+                f"yet they keep coming on schedule (is it down or sinkholed?)")
+        if f.retries:
+            line += f"; {f.retries:,} extra log records were the operating system retrying, counted once"
+        reasons.append(line)
+    elif f.retries and f.retries >= 0.25 * (f.connections + f.retries):
+        reasons.append(f"{f.retries:,} log records were the operating system retrying unanswered "
+                       f"connections, counted once per attempt")
+
+    if dead and f.median_bytes == 0:
+        pass  # "sends 0 bytes" says nothing new once we know nobody answered
+    elif f.same_size_share is not None and f.median_bytes is not None:
         if f.same_size_share >= 0.5:
             reasons.append(f"sends exactly {f.median_bytes:.0f} bytes in {f.same_size_share * 100:.0f}% of check-ins")
         elif f.size is not None and f.size >= 0.6:
