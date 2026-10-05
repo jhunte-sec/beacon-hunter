@@ -20,9 +20,16 @@ from statistics import median, quantiles
 from typing import Iterable, Optional, Sequence
 
 from . import allowlist
+from .timefmt import human_duration
 from .zeek import Conn
 
 WEIGHTS = {"timing": 0.5, "size": 0.2, "persistence": 0.3}
+
+ON_A_TIMER = 0.8        # timing score at which we call it a timer in the reasons
+
+# Folding missed check-ins back onto the timer (see fold_onto_period).
+MAX_MULTIPLE = 4        # a gap of up to 4 periods can be explained as missed beats
+MIN_GAPS_TO_FOLD = 8
 
 
 @dataclass
@@ -36,6 +43,14 @@ class Settings:
 
 
 @dataclass
+class Timing:
+    score: float
+    period: float               # the timer we think it's on, in seconds
+    jitter: float               # spread of the gaps around the period, as a fraction
+    missed: Optional[float]     # share of expected check-ins that never showed up (folded only)
+
+
+@dataclass
 class Finding:
     src: str
     dst: str
@@ -45,13 +60,23 @@ class Finding:
     events: int
     first_seen: float
     last_seen: float
-    median_interval: float
-    jitter: float               # median absolute deviation / median interval
+    period: float
+    jitter: float
+    missed: Optional[float]
     median_bytes: Optional[float]
+    same_size_share: Optional[float]
+    active_slices: int
+    slices: int
     timing: float
     size: Optional[float]
     persistence: float
     score: float
+    hosts: int = 1              # sources with a scored pair to the same destination
+    timer_hosts: int = 0        # of those, how many are on a timer
+    reasons: list[str] = field(default_factory=list)
+    timestamps: list[float] = field(default_factory=list, repr=False)
+    capture_start: float = 0.0
+    capture_end: float = 0.0
 
 
 def mad(values: Sequence[float], center: float) -> float:
@@ -100,21 +125,77 @@ def timing_score(intervals: Sequence[float]) -> float:
     return 0.7 * regularity(intervals) + 0.3 * (1.0 - abs(bowley_skew(intervals)))
 
 
+def fold_onto_period(intervals: Sequence[float]) -> Optional[Timing]:
+    """Score the timer while forgiving missed check-ins.
+
+    A laptop that sleeps, a dropped packet or a busy implant turns a 60 s timer
+    into gaps of 60, 60, 120, 60, 180. Taken at face value that looks irregular.
+    Here the base period is estimated from the shortest gaps, every gap that is
+    close to a whole multiple of it is divided back down, and the timing score
+    is multiplied by the share of gaps that fit. Random traffic rarely lines up
+    on whole multiples, so it gains nothing from this; the simulations behind
+    the thresholds are described in docs/how-it-works.md.
+    """
+    if len(intervals) < MIN_GAPS_TO_FOLD:
+        return None
+    ordered = sorted(intervals)
+    q1 = ordered[len(ordered) // 4]
+    shortest = [g for g in ordered if g <= 1.5 * q1]
+    base = median(shortest)
+    if base <= 0:
+        return None
+    # Allow more slack when the timer itself is jittery, within sane bounds.
+    tolerance = min(0.35, max(0.15, 2.5 * mad(shortest, base) / base))
+
+    folded, beats = [], 0
+    for gap in intervals:
+        k = round(gap / base)
+        if 1 <= k <= MAX_MULTIPLE and abs(gap / base - k) <= tolerance:
+            folded.append(gap / k)
+            beats += k
+    if len(folded) < 3:
+        return None
+
+    fit = len(folded) / len(intervals)
+    period = median(folded)
+    return Timing(
+        score=timing_score(folded) * fit,
+        period=period,
+        jitter=mad(folded, period) / period,
+        missed=(beats - len(folded)) / beats,
+    )
+
+
+def analyze_timing(intervals: Sequence[float]) -> Timing:
+    m = median(intervals)
+    plain = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None)
+    folded = fold_onto_period(intervals)
+    if folded is not None and folded.score > plain.score:
+        return folded
+    return plain
+
+
 def size_score(sizes: Sequence[int], connections: int) -> Optional[float]:
     """None when too few connections carry a byte count to judge."""
     if len(sizes) < 3 or len(sizes) < connections / 2:
         return None
-    mode_share = Counter(sizes).most_common(1)[0][1] / len(sizes)
-    return 0.5 * regularity(sizes) + 0.5 * mode_share
+    return 0.5 * regularity(sizes) + 0.5 * _mode_share(sizes)
+
+
+def _mode_share(sizes: Sequence[int]) -> float:
+    return Counter(sizes).most_common(1)[0][1] / len(sizes)
+
+
+def active_slices(events: Sequence[float], start: float, end: float, slices: int) -> int:
+    if end <= start or slices <= 1:
+        return slices
+    width = (end - start) / slices
+    return len({min(int((ts - start) / width), slices - 1) for ts in events})
 
 
 def persistence_score(events: Sequence[float], start: float, end: float, slices: int) -> float:
     """Share of the capture's time slices in which the pair was active."""
-    if end <= start or slices <= 1:
-        return 1.0
-    width = (end - start) / slices
-    active = {min(int((ts - start) / width), slices - 1) for ts in events}
-    return len(active) / slices
+    return active_slices(events, start, end, slices) / max(slices, 1)
 
 
 def combine(timing: float, size: Optional[float], persistence: float) -> float:
@@ -157,10 +238,10 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
         intervals = [b - a for a, b in zip(events, events[1:])]
         sizes = [c.orig_bytes for c in members if c.orig_bytes is not None]
 
-        timing = timing_score(intervals)
+        timing = analyze_timing(intervals)
         size = size_score(sizes, len(members))
-        persistence = persistence_score(events, start, end, settings.slices)
-        m = median(intervals)
+        active = active_slices(events, start, end, settings.slices)
+        persistence = active / settings.slices
 
         findings.append(Finding(
             src=src, dst=dst, dport=port, proto=proto,
@@ -168,14 +249,74 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
             events=len(events),
             first_seen=events[0],
             last_seen=events[-1],
-            median_interval=m,
-            jitter=mad(intervals, m) / m if m > 0 else 0.0,
+            period=timing.period,
+            jitter=timing.jitter,
+            missed=timing.missed,
             median_bytes=median(sizes) if sizes else None,
-            timing=timing,
+            same_size_share=_mode_share(sizes) if size is not None else None,
+            active_slices=active,
+            slices=settings.slices,
+            timing=timing.score,
             size=size,
             persistence=persistence,
-            score=combine(timing, size, persistence),
+            score=combine(timing.score, size, persistence),
+            timestamps=events,
+            capture_start=start,
+            capture_end=end,
         ))
+
+    # How many sources reach the same destination, and how many on a timer? A
+    # timer on every host is usually software you deployed; on one host it stands out.
+    sources: dict[tuple, set[str]] = defaultdict(set)
+    timed: dict[tuple, set[str]] = defaultdict(set)
+    for f in findings:
+        key = (f.dst, f.dport, f.proto)
+        sources[key].add(f.src)
+        if f.timing >= ON_A_TIMER:
+            timed[key].add(f.src)
+    for f in findings:
+        key = (f.dst, f.dport, f.proto)
+        f.hosts = len(sources[key])
+        f.timer_hosts = len(timed[key])
+        f.reasons = explain(f)
 
     findings.sort(key=lambda f: f.score, reverse=True)
     return findings
+
+
+def explain(f: Finding) -> list[str]:
+    """Plain-English reasons, the way you'd write them in a triage note."""
+    reasons = []
+    every = human_duration(f.period)
+    # jitter is the median absolute deviation, so "half the gaps" is exact, not a guess.
+    spread = f"half the gaps are within {f.jitter * 100:.0f}% of that"
+    if f.timing >= ON_A_TIMER:
+        line = f"checks in every {every}; " + ("almost exactly" if f.jitter < 0.01 else spread)
+    elif f.timing >= 0.6:
+        line = f"loosely periodic around {every}; {spread}"
+    else:
+        line = f"no clear timer: typical gap {every}, but half the gaps are more than {f.jitter * 100:.0f}% off"
+    if f.missed:
+        line += f"; about {f.missed * 100:.0f}% of expected check-ins are missing, but the rest stay on the timer"
+    reasons.append(line)
+
+    if f.same_size_share is not None and f.median_bytes is not None:
+        if f.same_size_share >= 0.5:
+            reasons.append(f"sends exactly {f.median_bytes:.0f} bytes in {f.same_size_share * 100:.0f}% of check-ins")
+        elif f.size is not None and f.size >= 0.6:
+            reasons.append(f"sends a similar amount each time (around {f.median_bytes:.0f} bytes)")
+        else:
+            reasons.append("the amount sent changes a lot between check-ins")
+
+    reasons.append(f"active in {f.active_slices} of {f.slices} time slices of the capture")
+
+    if f.timing >= ON_A_TIMER:
+        if f.timer_hosts >= 3:
+            reasons.append(f"{f.timer_hosts} hosts check in here on a timer, which usually means deployed software")
+        elif f.timer_hosts == 2:
+            reasons.append("one other host checks in here on a timer too")
+        else:
+            reasons.append("no other host checks in here on a timer")
+    elif f.hosts > 1:
+        reasons.append(f"{f.hosts} hosts talk to this destination")
+    return reasons

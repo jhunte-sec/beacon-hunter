@@ -2,7 +2,7 @@ import random
 
 from beacon_hunter import allowlist
 from beacon_hunter.scoring import (
-    Settings, analyze, bowley_skew, merge_events, persistence_score,
+    Settings, analyze, analyze_timing, bowley_skew, merge_events, persistence_score,
     regularity, size_score, timing_score,
 )
 from beacon_hunter.zeek import Conn
@@ -86,3 +86,63 @@ def test_missing_ports_still_group():
     findings = analyze(conns)
     assert len(findings) == 1
     assert findings[0].size is None
+
+
+def _beacon_with_missed_checkins(rng, period=300, jitter=0.1, missed=0.3, count=300):
+    ts, out, t = [], [], 0.0
+    for _ in range(count):
+        t += period * (1 + rng.uniform(-jitter, jitter))
+        if rng.random() >= missed:
+            out.append(t)
+    return [b - a for a, b in zip(out, out[1:])]
+
+
+def test_missed_check_ins_are_folded_back_onto_the_timer(rng):
+    gaps = _beacon_with_missed_checkins(rng)
+    plain = timing_score(gaps)
+    timing = analyze_timing(gaps)
+    assert plain < 0.75                      # face value: looks irregular
+    assert timing.score > 0.88               # folded: clearly a timer
+    assert abs(timing.period - 300) < 15
+    assert 0.2 < timing.missed < 0.4
+
+
+def test_folding_does_not_help_random_traffic(rng):
+    for _ in range(20):
+        gaps = [rng.expovariate(1 / 300) for _ in range(300)]
+        assert analyze_timing(gaps).score < 0.6
+
+
+def test_steady_beacon_is_not_reported_as_missing_check_ins(rng):
+    gaps = [300 * (1 + rng.uniform(-0.1, 0.1)) for _ in range(200)]
+    assert analyze_timing(gaps).missed in (None, 0.0)
+
+
+def test_hosts_counts_sources_sharing_a_destination():
+    conns = []
+    for n in range(4):
+        conns += beacon(f"10.0.0.{n + 1}", "10.0.0.20", 1514, n, interval=60, jitter=0.01, count=50)
+    conns += beacon("10.0.0.9", "203.0.113.50", 443, 0, interval=300, jitter=0.1, count=50)
+    by_dst = {f.dst: f for f in analyze(conns)}
+    assert by_dst["10.0.0.20"].hosts == 4
+    assert by_dst["203.0.113.50"].hosts == 1
+    assert by_dst["10.0.0.20"].timer_hosts == 4
+    assert any("deployed software" in r for r in by_dst["10.0.0.20"].reasons)
+    assert any("no other host" in r for r in by_dst["203.0.113.50"].reasons)
+
+
+def test_reasons_read_like_a_triage_note():
+    conns = beacon("10.0.0.5", "203.0.113.50", 443, 0, interval=300, jitter=0.0, count=100, size=412)
+    reasons = analyze(conns)[0].reasons
+    assert reasons[0].startswith("checks in every 5m00s")
+    assert "sends exactly 412 bytes in 100% of check-ins" in reasons
+
+
+def test_random_traffic_from_many_hosts_is_not_called_deployed_software():
+    rng = random.Random(5)
+    conns = []
+    for n in range(4):
+        conns += random_traffic(f"10.0.0.{n + 1}", "10.0.0.53", 53, 0, mean_gap=40, count=300, rng=rng)
+    for f in analyze(conns):
+        assert f.timer_hosts == 0
+        assert not any("deployed software" in r for r in f.reasons)
