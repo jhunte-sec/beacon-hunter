@@ -175,10 +175,13 @@ def merge_events(timestamps: Sequence[float], window: float) -> list[float]:
     return events
 
 
-def near(values: Sequence[float], target: float, tolerance: float = 0.10) -> float:
-    """Share of values within `tolerance` (a fraction) of target."""
+def coverage(values: Sequence[float], target: float) -> float:
+    """Share of values that sit on the timer: within 10% of it, or within three
+    typical deviations for a jittery timer. Ordinary jitter counts as on the
+    timer; outliers far from it don't."""
     if not values or target <= 0:
         return 0.0
+    tolerance = max(0.10, 3 * mad(values, target) / target)
     return sum(abs(v - target) <= tolerance * target for v in values) / len(values)
 
 
@@ -282,7 +285,7 @@ def find_cycle(intervals: Sequence[float]) -> Optional[Timing]:
         score = timing_score(spans)
         if score < ON_A_TIMER:
             return None  # the gaps recur, but the cycle itself isn't steady enough to call a timer
-        return Timing(score, period, mad(spans, period) / period, None, pattern, coverage=near(spans, period))
+        return Timing(score, period, mad(spans, period) / period, None, pattern, coverage=coverage(spans, period))
     return None
 
 
@@ -298,7 +301,7 @@ def analyze_timing(intervals: Sequence[float], fold: bool = True, cycles: bool =
     """
     m = median(intervals)
     best = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None,
-                  coverage=near(intervals, m))
+                  coverage=coverage(intervals, m))
     candidates = []
     if fold:
         candidates.append(fold_onto_period(intervals))
@@ -308,7 +311,10 @@ def analyze_timing(intervals: Sequence[float], fold: bool = True, cycles: bool =
         if candidate is None:
             continue
         better = candidate.score > best.score + 0.02
-        as_good_but_explains_more = (candidate.score >= best.score - 0.02
+        # Coverage is only comparable between a plain timer and a cycle (both use the
+        # same rule); folding counts its fits with its own tolerance.
+        as_good_but_explains_more = (candidate.cycle is not None
+                                     and candidate.score >= best.score - 0.02
                                      and candidate.coverage >= best.coverage + 0.15)
         if better or as_good_but_explains_more:
             best = candidate

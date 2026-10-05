@@ -50,8 +50,12 @@ def read_labeled(path: Path):
             except (KeyError, ValueError):
                 continue
             size = row.get("orig_bytes", "-")
+            sport = row.get("id.orig_p", "-")
+            state = row.get("conn_state", "-")
             conn = Conn(ts, row["id.orig_h"], row["id.resp_h"], dport, row["proto"],
-                        int(size) if size.isdigit() else None)
+                        int(size) if size.isdigit() else None,
+                        sport=int(sport) if sport.isdigit() else None,
+                        answered=None if state in ("-", "") else state != "S0")
             conns.append(conn)
             # The 2019 files call it "detailed-label"; scenario 34-1, re-published in 2023, says "det_label".
             detail = row.get("detailed-label", row.get("det_label", "-"))
@@ -79,8 +83,9 @@ def report_order(findings):
 
 
 def worth_a_look(findings):
-    """Exactly the HTML report's "Worth a look" section, in its order."""
-    return report_order([f for f in findings if f.timing >= ON_A_TIMER and f.timer_hosts < FLEET])
+    """Exactly the HTML report's "Worth a look" section: unexplained single-host timers, best first."""
+    return sorted((f for f in findings if f.timing >= ON_A_TIMER and f.timer_hosts < FLEET and not f.service_hint),
+                  key=lambda f: -f.score)
 
 
 def best_rank(order, labels):
@@ -94,13 +99,18 @@ def main() -> int:
     parser.add_argument("--show", type=int, default=0, help="list the top N pairs of each scenario")
     args = parser.parse_args()
 
+    variants = {
+        "plain": Settings(fold=False, cycles=False, merge_retries=False),
+        "retries": Settings(fold=False, cycles=False, merge_retries=True),
+        "cycles": Settings(fold=False, cycles=True, merge_retries=False),
+    }
     runs = []
     for path in args.logs:
         conns, labels = read_labeled(path)
         name = path.name.split(".")[0]
         full = analyze(conns, Settings())
-        plain = {key(f): f for f in analyze(conns, Settings(fold=False, cycles=False))}
-        runs.append((name, conns, labels, full, plain))
+        others = {v: {key(f): f for f in analyze(conns, s)} for v, s in variants.items()}
+        runs.append((name, conns, labels, full, others))
 
     print("| scenario | family | connections | pairs scored | C&C pairs | C&C pairs scorable | "
           "best C&C rank by raw score | C&C called a timer | place in \"worth a look\" |")
@@ -114,14 +124,19 @@ def main() -> int:
               f"{best_rank(look, labels)}{f' of {len(look)}' if timers else ''} |")
 
     print()
-    print("| scenario | C&C destination | connections | timing, plain | timing, beacon-hunter | what the report says |")
-    print("|---|---|---|---|---|---|")
-    for name, _, labels, full, plain in runs:
+    print("Timing score of every scorable C&C pair with each technique alone, then all together.")
+    print()
+    print("| scenario | C&C destination | log records | attempts | plain | retry merging only | "
+          "cycle detection only | beacon-hunter | what the report says |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for name, _, labels, full, others in runs:
         for f in full:
             if key(f) in labels:
-                p = plain.get(key(f))
-                print(f"| {name} ({FAMILY.get(name, '?')}) | {destination(f)} | {f.connections:,} | "
-                      f"{p.timing:.2f} | **{f.timing:.2f}** | {f.reasons[0]} |")
+                plain = others["plain"].get(key(f))
+                cells = [f"{others[v][key(f)].timing:.2f}" if key(f) in others[v] else "-"
+                         for v in ("plain", "retries", "cycles")]
+                print(f"| {name} ({FAMILY.get(name, '?')}) | {destination(f)} | {plain.connections:,} | "
+                      f"{f.connections:,} | {' | '.join(cells)} | **{f.timing:.2f}** | {f.reasons[0]} |")
 
     for name, _, labels, full, _ in runs:
         if args.show <= 0:

@@ -1,12 +1,12 @@
 """Draw the README figures, in a dark and a light version each.
 
-    python eval/plot.py        # the results and cycle figures read eval/data/ (see eval/README.md)
+    python eval/plot.py        # the results and retries figures read eval/data/ (see eval/README.md)
 
 Writes to docs/img/:
 
   beacon-vs-browsing-{dark,light}.svg   what a beacon looks like next to a person browsing
   missed-checkins-{dark,light}.svg      problem 1: gaps that are whole multiples of the timer
-  cycle-{dark,light}.svg                problem 2: Hakai's real retry loop, from IoT-23
+  retries-{dark,light}.svg              problem 2: how a dead server scrambles Hakai's timer in Zeek's log
   results-{dark,light}.svg              every scorable C&C channel in IoT-23, before and after
   simulation-{dark,light}.svg           how detection holds up as check-ins go missing
 
@@ -170,38 +170,73 @@ def missed_checkins(theme: dict) -> str:
 # ------------------------------------------------------------------ figure 3
 
 HAKAI = DATA / "CTU-IoT-Malware-Capture-8-1.conn.log.labeled"
+HAKAI_PCAP = DATA / "CTU-IoT-Malware-Capture-8-1.pcap"
+C2 = "128.185.250.50"
 
 
-def hakai_times() -> list[float]:
-    """Nine consecutive real connections from Hakai's C2 retry loop, starting on a cycle."""
+def hakai_real():
+    """Two full attempts from the raw packets, and Zeek's records for the same moments."""
+    from beacon_hunter import pcap
+    syns = []
+    with open(HAKAI_PCAP, "rb") as fh:
+        for ts, lt, frame in pcap.packets(fh):
+            p = pcap.decode(lt, frame)
+            if p and p.proto == "tcp" and p.dst == C2 and p.flags & 0x02:
+                syns.append((ts, p.sport))
+            if len(syns) > 40:
+                break
+    ports = []
+    for _, port in syns:
+        if port not in ports:
+            ports.append(port)
+    first, third = ports[0], ports[2]
+    t0 = min(t for t, port in syns if port == first)
+    t_end = min(t for t, port in syns if port == third)
+    packets = [(t - t0, port) for t, port in syns if t < t_end]
     conns, _ = iot23.read_labeled(HAKAI)
-    ts = merge_events([x.ts for x in conns if x.dst == "128.185.250.50" and x.dport == 50], 1.0)
-    gaps = [b - a for a, b in zip(ts, ts[1:])]
-    start = next(i + 1 for i, g in enumerate(gaps[:50]) if g > 40)   # right after a long wait
-    window = ts[start:start + 9]
-    return [t - window[0] for t in window]
+    records = sorted(c.ts - t0 for c in conns if c.dst == C2 and t0 - 0.5 <= c.ts <= t_end + 0.5)
+    return packets, records, t_end - t0
 
 
-def cycle(theme: dict) -> str:
-    times = hakai_times()
-    c = Canvas(theme, 320, "Real connections from Hakai malware to its command server: waits of 7, 8, 17 and "
-                           "48 seconds repeat, so every fourth connection is exactly 80 seconds apart")
-    c.title("Problem 2: some malware repeats a pattern, not a gap",
-            "Real traffic: Hakai malware retrying its command server (IoT-23 capture 8-1).")
-    x0, x1, y = 60, 700, 156
-    span = times[-1]
+def retries(theme: dict) -> str:
+    packets, records, span = hakai_real()
+    c = Canvas(theme, 404, "Hakai malware makes one connection attempt every 80 seconds to a server that never "
+                           "answers; the operating system retries each one, and Zeek logs the retries as separate "
+                           "connections 7, 8, 17 and 48 seconds apart")
+    c.title("Problem 2: a dead server scrambles the timer in the log",
+            "Real traffic: Hakai malware calling its command server, which never answers (IoT-23 capture 8-1).")
+    x0, x1 = 196, 724
     X = lambda t: x0 + t / span * (x1 - x0)  # noqa: E731
 
-    c.line(x0, y + 14, x1, y + 14, color="axis")
-    ticks(c, x0, x1, y, times, span, color="accent")
-    c.text(x0 - 12, y + 40, "wait", size=12, color="muted", anchor="end")
-    for a, b in zip(times, times[1:]):
-        c.text((X(a) + X(b)) / 2, y + 40, f"{b - a:.1f}s", size=11.5, color="ink2", anchor="middle")
-    for k in (0, 4):
-        c.bracket(X(times[k]), X(times[k + 4]), y - 26, f"{times[k + 4] - times[k]:.0f} seconds", color="ink")
+    # What the program does: one attempt per source port, plus the OS's automatic retries.
+    y1 = 140
+    c.text(28, y1 - 3, "What the malware does", size=14, color="ink", weight=600)
+    c.text(28, y1 + 15, "one attempt every 80 s", size=12.5, color="muted")
+    c.line(x0, y1 + 14, x1, y1 + 14, color="axis")
+    seen = set()
+    for t, port in packets:
+        if port not in seen:
+            seen.add(port)
+            c.line(X(t), y1 - 16, X(t), y1 + 14, color="accent", width=2.5, cap="round")
+        else:
+            c.line(X(t), y1 + 2, X(t), y1 + 14, color="muted", width=1.5, cap="round")
+    starts = sorted({min(t for t, p in packets if p == port) for port in seen})
+    c.bracket(X(starts[0]), X(starts[1]), y1 - 26, "80 s", color="ink")
+    c.text(X(starts[0]) + 6, y1 + 32, "short marks: the OS re-sending the unanswered request (1, 3, 7, 15, 31 s)",
+           size=11.5, color="muted")
 
-    c.verdict(36, 244, False, "Gap by gap:", "7, 8, 17, 48 seconds looks random. Standard score 0.65, not flagged.")
-    c.verdict(36, 278, True, "Cycle by cycle:", "80 seconds every time, 1,027 times in a row. beacon-hunter scores it 1.00.")
+    # What Zeek's conn.log records for the same minutes.
+    y2 = 250
+    c.text(28, y2 - 3, "What Zeek's log records", size=14, color="ink", weight=600)
+    c.text(28, y2 + 15, "4 \"connections\" per attempt", size=12.5, color="muted")
+    c.line(x0, y2 + 14, x1, y2 + 14, color="axis")
+    for t in records:
+        c.line(X(t), y2 - 14, X(t), y2 + 14, color="context", width=2.5, cap="round")
+    for a, b in zip(records, records[1:]):
+        c.text((X(a) + X(b)) / 2, y2 + 34, f"{b - a:.0f}s", size=12, color="ink2", anchor="middle")
+
+    c.verdict(36, 324, False, "Standard check on the log:", "gaps of 7, 8, 17, 48 s look irregular. Score 0.65, not flagged.")
+    c.verdict(36, 358, True, "beacon-hunter:", "retries keep the same source port, so they count once. Every 80 s: score 1.00.")
     return c.render()
 
 
@@ -210,11 +245,12 @@ def cycle(theme: dict) -> str:
 def results_rows():
     """Every scorable C&C channel in the IoT-23 captures, grouped by what it is."""
     found = {}
+    plain_settings = Settings(fold=False, cycles=False, merge_retries=False)
     for path in sorted(DATA.glob("CTU-IoT-*.labeled")):
         name = path.name.split(".")[0]
         conns, labels = iot23.read_labeled(path)
         full = analyze(conns, Settings())
-        plain = {iot23.key(f): f.timing for f in analyze(conns, Settings(fold=False, cycles=False))}
+        plain = {iot23.key(f): f.timing for f in analyze(conns, plain_settings)}
         found[name] = [(f.timing, plain[iot23.key(f)]) for f in full if iot23.key(f) in labels]
 
     def avg(*names):
@@ -222,10 +258,8 @@ def results_rows():
         return (sum(p for _, p in pairs) / len(pairs), sum(f for f, _ in pairs) / len(pairs))
 
     return [
-        ("Mirai botnet", "IRC command channel", *avg("34-1"), True, "Caught.", "Alternates 3 s and 7 s waits."),
-        ("Hakai botnet", "2 command servers", *avg("8-1"), True, "Caught.", "Repeats a 4-step, 80 s loop."),
-        ("Torii botnet", "command server, 2 captures", *avg("20-1", "21-1"), False,
-         "Not flagged.", "~15 connections, bursts hours apart."),
+        ("Mirai botnet", "IRC command channel", *avg("34-1"), True, "Caught.", "Tries every 10 s; rarely answered."),
+        ("Hakai botnet", "2 command servers", *avg("8-1"), True, "Caught.", "Tries every 80 s; never answered."),
         ("Mirai botnet", "malware download", *avg("44-1"), False, "Not a beacon.", "One burst of downloads."),
     ]
 
@@ -236,7 +270,7 @@ def results(theme: dict) -> str:
     bottom = top + row_h * len(rows) - 20
     H = bottom + 82
     c = Canvas(theme, H, "Real command-and-control traffic from IoT-23: the standard method misses the Mirai and "
-                         "Hakai channels, beacon-hunter flags both; Torii and a one-off download stay unflagged")
+                         "Hakai channels, beacon-hunter flags both; a one-off download stays unflagged")
     c.title("Tested on real malware traffic",
             "How regular each command-and-control channel looks, from 0 (random) to 1 (clockwork).")
     x0, x1 = 236, 520
@@ -268,8 +302,8 @@ def results(theme: dict) -> str:
         c.text(552, y + 4, verdict, size=13.5, color="ink" if caught else "ink2", weight=600)
         c.text(552, y + 22, why, size=12, color="muted")
 
-    c.text(28, H - 22, "Not shown: 7 more C&C connections were one-off downloads or single long sessions. "
-                       "No timing method can see those.", size=12, color="muted")
+    c.text(28, H - 22, "Not shown: 9 more C&C channels had too few attempts to judge (one-off downloads, single "
+                       "long sessions, Torii's handful of tries).", size=12, color="muted")
     return c.render()
 
 
@@ -314,7 +348,7 @@ def simulation(theme: dict) -> str:
 FIGURES = {
     "beacon-vs-browsing": (beacon_vs_browsing, False),
     "missed-checkins": (missed_checkins, False),
-    "cycle": (cycle, True),
+    "retries": (retries, True),
     "results": (results, True),
     "simulation": (simulation, False),
 }
@@ -322,7 +356,7 @@ FIGURES = {
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    have_data = HAKAI.exists()
+    have_data = HAKAI.exists() and HAKAI_PCAP.exists()
     for name, (draw, needs_data) in FIGURES.items():
         if needs_data and not have_data:
             print(f"skipped {name}: needs the IoT-23 logs in eval/data/ (see eval/README.md)")

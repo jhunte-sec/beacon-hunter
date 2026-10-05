@@ -190,3 +190,13 @@ def test_cycle_reason_spells_out_the_pattern():
     conns = [Conn(ts, "10.0.0.5", "203.0.113.50", 50, "tcp", 0) for ts in times]
     reason = analyze(conns)[0].reasons[0]
     assert reason.startswith("repeats a 3-connection cycle every 1m00s (waits 5s, 5s, 50s")
+
+
+def test_coverage_counts_jitter_as_on_the_timer_but_not_outliers(rng):
+    jittery = [300 * (1 + rng.uniform(-0.15, 0.15)) for _ in range(300)]
+    assert analyze_timing(jittery).coverage > 0.95
+    spiky = [10.0] * 60 + [rng.uniform(1, 7) for _ in range(25)] + [rng.uniform(30, 40) for _ in range(15)]
+    rng.shuffle(spiky)
+    timing = analyze_timing(spiky, fold=False)
+    assert timing.score >= 0.8 and abs(timing.period - 10) < 0.01
+    assert 0.55 < timing.coverage < 0.65

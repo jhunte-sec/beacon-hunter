@@ -476,6 +476,10 @@ def headline(f: Finding) -> str:
     return f"{_addr(f.src)} checks in with {_addr(f.dst)} on {escape(_service(f))} {rhythm}"
 
 
+def _dead(f: Finding) -> bool:
+    return f.unanswered is not None and f.unanswered >= 0.9
+
+
 def what_it_means(f: Finding) -> str:
     """The finding as a person would explain it, from the same numbers as the reasons."""
     every = human_duration(f.period)
@@ -487,13 +491,14 @@ def what_it_means(f: Finding) -> str:
     else:
         when = "around the clock" if f.persistence >= 0.9 else f"in {f.active_slices} of {f.slices} slices of the capture"
         text = f"This machine contacts {f.dst} like clockwork: every {every}, {when}"
-        if f.same_size_share and f.same_size_share >= 0.5 and f.median_bytes is not None and f.median_bytes < 4096:
+        if (f.same_size_share and f.same_size_share >= 0.5 and f.median_bytes is not None
+                and 0 < f.median_bytes < 4096):
             text += ", sending the same small message each time"
         text += "."
     if f.missed:
         text += (f" About {f.missed * 100:.0f}% of the expected check-ins never arrived, which is what a machine "
                  f"that sleeps or goes offline looks like, but the rest land right on the timer.")
-    if f.unanswered is not None and f.unanswered >= 0.9:
+    if _dead(f):
         text += (" The server never answers, but the attempts keep coming on schedule. That's typical of "
                  "malware whose command server has been taken down or sinkholed: it keeps calling anyway.")
     if f.process:
@@ -501,7 +506,7 @@ def what_it_means(f: Finding) -> str:
     if f.service_hint:
         text += (f" {f.dport}/{f.proto} is normally {f.service_hint}, which runs on a timer by design, so this is "
                  f"probably fine if {f.dst} is a server you run or trust.")
-    elif f.cycle:
+    elif f.cycle or _dead(f):
         text += " Find out which program on the machine is doing it before anything else."
     else:
         text += (" Malware asks its operator for instructions exactly like this, but so do update checkers and "
@@ -688,7 +693,9 @@ def verdict(look: Sequence[Finding], known: Sequence[Finding]) -> str:
     rhythm = (f"repeating a {len(top.cycle)}-step cycle every {escape(human_duration(top.period))}" if top.cycle
               else f"every {escape(human_duration(top.period))}")
     lead = f"Strongest: {_addr(top.src)} contacts {_addr(top.dst)} on {escape(_service(top))} {rhythm}"
-    if top.same_size_share and top.same_size_share >= 0.5 and top.median_bytes is not None:
+    if _dead(top):
+        lead += ", and the server never answers"
+    elif top.same_size_share and top.same_size_share >= 0.5 and top.median_bytes:
         lead += f", sending exactly {top.median_bytes:.0f} bytes {top.same_size_share * 100:.0f}% of the time"
     lead += (". No other host does this." if top.timer_hosts <= 1 else ".")
     if known:

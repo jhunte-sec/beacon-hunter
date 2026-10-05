@@ -2,14 +2,14 @@
 
 [![tests](https://github.com/jhunte-sec/beacon-hunter/actions/workflows/tests.yml/badge.svg)](https://github.com/jhunte-sec/beacon-hunter/actions/workflows/tests.yml)
 
-Finds malware "phoning home" in network logs. It spots machines that contact the same server on a timer, explains each one in plain English, and writes a one-file report you can attach to a ticket.
+Finds malware "phoning home" in network logs. It spots machines that contact the same server on a timer, explains each one in plain English, and writes a one-file report you can attach to a ticket. It reads Zeek, Suricata, Sysmon, CSV exports and raw packet captures.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/report-dark.png">
-  <img alt="beacon-hunter report on a real malware capture: 2 pairs worth a look, a beacon map with one row per conversation, and a finding card that explains Hakai malware's 4-step retry loop" src="docs/img/report-light.png" width="760">
+  <img alt="beacon-hunter report on a real malware capture: 2 pairs worth a look, a beacon map with one row per conversation, and a finding card explaining that the machine contacts its server every 80 seconds although the server never answers" src="docs/img/report-light.png" width="760">
 </picture>
 
-<sub>The report above is from a real malware capture (IoT-23, Hakai botnet), not a mockup. Both of the malware's command servers come out on top, and the card explains the retry loop it uses.</sub>
+<sub>The report above is from a real malware capture (IoT-23, Hakai botnet), not a mockup. Both of the malware's command servers come out on top, and the card explains what's going on: an attempt every 80 seconds, to servers that never answer.</sub>
 
 ## What it looks for
 
@@ -30,11 +30,13 @@ The usual test is simple: are the gaps between connections always the same? Real
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/cycle-dark.svg">
-  <img alt="Real connections from Hakai malware: waits of 7, 8, 17 and 48 seconds repeat, so every fourth connection is exactly 80 seconds apart" src="docs/img/cycle-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/retries-dark.svg">
+  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; the operating system retries each one, and Zeek logs the retries as separate connections 7, 8, 17 and 48 seconds apart" src="docs/img/retries-light.svg" width="760">
 </picture>
 
-beacon-hunter handles both: it folds missed check-ins back onto the timer, and it checks whether each gap matches the one a few places later to find repeating cycles. How each works, with the maths, is in [docs/how-it-works.md](docs/how-it-works.md).
+The second one matters more than it looks. Command servers get taken down and sinkholed all the time, and the malware keeps calling anyway. Every unanswered call gets retried by the operating system, and the log turns a clean timer into noise.
+
+beacon-hunter handles both. It folds missed check-ins back onto the timer, and it counts retries of one connection once (they keep the same source port). For logs that don't record source ports it also looks for timers that repeat a multi-step pattern. How each works, with the maths, is in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Does it work on real malware?
 
@@ -42,7 +44,7 @@ I tested it on [IoT-23](https://www.stratosphereips.org/datasets-iot23), a publi
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/results-dark.svg">
-  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; Torii and a one-off download stay unflagged" src="docs/img/results-light.svg" width="760">
+  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; a one-off download stays unflagged" src="docs/img/results-light.svg" width="760">
 </picture>
 
 And in simulation, where the right answer is known exactly, missed check-ins stop being a problem:
@@ -52,7 +54,7 @@ And in simulation, where the right answer is known exactly, missed check-ins sto
   <img alt="As more check-ins go missing, the standard method stops catching beacons while beacon-hunter keeps catching most of them" src="docs/img/simulation-light.svg" width="760">
 </picture>
 
-Neither improvement made random traffic look like a beacon: 0 false alarms in 1,500 simulated samples. The full write-up, including what it **doesn't** catch and why, is in [docs/evaluation.md](docs/evaluation.md).
+None of this made random traffic look like a beacon: 0 false alarms in 1,500 simulated samples. The full write-up, including what it **doesn't** catch and a correction I had to make along the way, is in [docs/evaluation.md](docs/evaluation.md).
 
 ## Quick start
 
@@ -72,11 +74,11 @@ The demo log is synthetic: one planted beacon plus the kind of regular-but-harml
 ```
 score  source      destination            conns  every  jitter  missed  bytes  hosts  timing  size  persist
 -----  ----------  ---------------------  -----  -----  ------  ------  -----  -----  ------  ----  -------
-0.99   10.0.20.22  192.0.2.80:443/tcp     24     1h00m  0%      -       1830   1      0.99    1.00  1.00
+1.00   10.0.20.22  192.0.2.80:443/tcp     24     1h00m  0%      -       1830   1      0.99    1.00  1.00
 0.95   10.0.20.15  203.0.113.50:443/tcp   289    4m59s  7%      -       412    1      0.95    0.88  1.00
 0.63   10.0.20.41  198.51.100.25:443/tcp  150    7m11s  63%     -       31082  2      0.55    0.26  1.00
 
-0.99  10.0.20.22 -> 192.0.2.80:443/tcp
+1.00  10.0.20.22 -> 192.0.2.80:443/tcp
       - checks in every 1h00m; almost exactly
       - sends exactly 1830 bytes in 100% of check-ins
       - active in 24 of 24 time slices of the capture
@@ -104,10 +106,20 @@ The top result is the demo's harmless hourly update check, and it really is the 
 
 ```bash
 beacon-hunter /opt/zeek/logs/2026-10-03/conn.*.log.gz --html report.html
+beacon-hunter eve.json sysmon-network.json capture.pcapng --explain
+beacon-hunter firewall.csv --csv-map "ts=Log Time,src=Client,dst=Server,dport=Port"
 beacon-hunter conn.log --json > findings.json      # for a SIEM or a notebook
 ```
 
-It reads Zeek's default tab-separated logs and JSON logs, gzipped or not, including JSON where a pipeline flattened `id.orig_h` to `id_orig_h` (as Wazuh and Logstash often do). Pass a whole day of rotated logs at once.
+Each file's format is detected from its content, so a mix is fine:
+
+| source | what it reads | notes |
+|---|---|---|
+| **Zeek** | `conn.log`, tab-separated or JSON, gzipped or not | also JSON where a pipeline flattened `id.orig_h` to `id_orig_h` (Wazuh, Logstash) |
+| **Suricata** | `eve.json` flow records | timed from `flow.start`, not the record's timestamp, which is when the flow *ended* |
+| **Sysmon** | Event ID 3 as Winlogbeat, Wazuh or plain JSON, `wevtutil` XML, or `.evtx` | adds the **program** making the connections, and scores programs separately; `.evtx` needs `pip install python-evtx` |
+| **CSV** | firewall, proxy or SIEM exports | recognises common column names (Palo Alto and generic); `--csv-map` for the rest |
+| **pcap / pcapng** | raw packet captures | a built-in connection tracker; checked against Zeek on the same capture, conversation by conversation ([results](docs/evaluation.md#3-the-pcap-reader-against-zeek)) |
 
 | option | what it does |
 |---|---|
@@ -115,19 +127,20 @@ It reads Zeek's default tab-separated logs and JSON logs, gzipped or not, includ
 | `--explain` | print the reasons for each result under the table |
 | `--html FILE` | write the self-contained report |
 | `--json` | machine-readable output, one object per pair |
+| `--format NAME`, `--csv-map MAP` | skip format detection; name CSV columns |
 | `--top N`, `--min-score X` | limit the table |
 | `--min-events N` | check-ins needed before a pair is scored (default 10) |
 | `--merge-window S` | connections closer than this count as one check-in (default 1 s) |
 | `--no-port` | group by host pair, ignoring the destination port |
-| `--no-fold`, `--no-cycles` | turn off the two timing improvements, to compare |
+| `--no-retry-merge`, `--no-fold`, `--no-cycles` | turn off each timing improvement, to compare |
 
-**Build your allowlist first.** On any real network the first run is dominated by things that are supposed to run on a timer: NTP, DNS, your SIEM and EDR agents, update checkers. The report helps: timers seen on three or more hosts get their own section with ready-made allowlist lines (check them first, since a worm spreading across hosts looks fleet-wide too), and known timer services like NTP are listed after unknown ones.
+**Build your allowlist first.** On any real network the first run is dominated by things that are supposed to run on a timer: NTP, DNS, your SIEM and EDR agents, update checkers. The report helps: timers seen on three or more hosts get their own section with ready-made allowlist lines (check them first, since a worm spreading across hosts looks fleet-wide too), and known timer services like NTP get their own table instead of counting as findings.
 
 ## How it works
 
-Connections are grouped by source, destination, port and protocol, and each group gets three scores between 0 and 1:
+Connections are grouped by source, destination, port, protocol and (when the log names it) program, and each group gets three scores between 0 and 1:
 
-- **timing:** are the gaps between check-ins regular? Median absolute deviation and quartile skew of the gaps, plus missed-check-in folding and cycle detection
+- **timing:** are the gaps between check-ins regular? Median absolute deviation and quartile skew of the gaps, after counting retries once, plus missed-check-in folding and cycle detection
 - **size:** does each check-in send the same number of bytes?
 - **persistence:** does it keep going across the whole capture?
 
@@ -135,15 +148,15 @@ The details, with worked numbers, are in [docs/how-it-works.md](docs/how-it-work
 
 ## Limitations
 
-- **Timing only.** It sees `conn.log`: timestamps, ports and byte counts. No payloads, TLS fingerprints or DNS names.
+- **Timing only.** It sees connections: timestamps, ports and byte counts. No payloads, TLS fingerprints or DNS names.
 - **A single long-lived connection is invisible.** Some C2 holds one session open instead of checking in. That is one log line, and no timing method can see it.
-- **Grouping is by IP.** A beacon to a big CDN shares its destination with legitimate traffic, which blurs the timing.
+- **Grouping is by IP.** A beacon to a big CDN shares its destination with legitimate traffic, which blurs the timing. Sysmon's program names help here.
 - **Long sleeps need long captures.** Ten check-ins at a 6-hour interval means more than two days of logs.
 - **Regular is not malicious.** IoT devices and update agents call home on timers too. It finds candidates; a person decides.
 
 ## Data
 
-The evaluation uses [IoT-23](https://www.stratosphereips.org/datasets-iot23) by the Stratosphere Laboratory, CTU Prague (Parmisano, Garcia, Erquiaga), CC BY. The logs are downloaded separately, not included; see [eval/README.md](eval/README.md).
+The evaluation uses [IoT-23](https://www.stratosphereips.org/datasets-iot23) by the Stratosphere Laboratory, CTU Prague (Parmisano, Garcia, Erquiaga), CC BY. The logs and capture are downloaded separately, not included; see [eval/README.md](eval/README.md).
 
 ## License
 
