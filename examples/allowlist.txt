@@ -1,0 +1,6 @@
+# Destinations that check in on a timer for legitimate reasons.
+# Build your own from what you see on your network; these match the demo log.
+
+*:123              # NTP time sync
+10.0.0.20:1514     # SIEM agent keepalive (Wazuh uses 1514/tcp)
+10.0.0.53:53       # internal DNS resolver

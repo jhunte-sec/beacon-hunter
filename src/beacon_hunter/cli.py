@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         print(to_json(findings))
     else:
         print(table(findings))
+        sys.stdout.flush()
         print(f"\n{stats.rows} connections read, {stats.skipped} skipped as malformed.", file=sys.stderr)
     return 0
 
