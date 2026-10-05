@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import __version__, allowlist
-from .report import table, to_json
+from . import html_report
+from .report import explained, table, to_json
 from .scoring import Settings, analyze
 from .zeek import ReadStats, read_conn_logs
 
@@ -28,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allowlist", help="file of destinations to ignore (see examples/allowlist.txt)")
     p.add_argument("--include-multicast", action="store_true", help="also score multicast and broadcast destinations")
     p.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    p.add_argument("--explain", action="store_true", help="after the table, write out the reasons for each result")
+    p.add_argument("--html", metavar="FILE", help="also write a self-contained HTML report to FILE")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
@@ -60,10 +64,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.top > 0:
         findings = findings[: args.top]
 
+    if args.html:
+        page = html_report.render(findings, args.logs, stats.rows, stats.skipped)
+        Path(args.html).write_text(page, encoding="utf-8")
+
     if args.json:
         print(to_json(findings))
     else:
         print(table(findings))
+        if args.explain and findings:
+            print("\n" + explained(findings))
+        if args.html:
+            print(f"\nHTML report written to {args.html}")
         sys.stdout.flush()
         print(f"\n{stats.rows} connections read, {stats.skipped} skipped as malformed.", file=sys.stderr)
     return 0
