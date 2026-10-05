@@ -20,6 +20,18 @@ Two measurements, both chosen because a few odd gaps (a laptop going to sleep, a
 
 Some implants open two or three connections per check-in. Counted separately, the gaps would alternate tiny, large, tiny, large, and the timer would disappear. So connections less than `--merge-window` seconds apart (default 1 s) are merged into a single check-in first.
 
+### Missed check-ins are folded back onto the timer
+
+Real beacons miss beats: a laptop sleeps, a packet drops. A 60-second timer then produces gaps like 60, 60, 120, 60, 180, and the regularity measure above reads that as irregular. So beacon-hunter also tries this:
+
+1. **Estimate the base period** from the shortest gaps: the median of every gap up to 1.5 × the lower quartile.
+2. **Fold** every gap that sits close to a whole multiple of it (up to 4×) back down: 120 becomes 2 × 60, 180 becomes 3 × 60. "Close" is ±15% of the period, widened up to ±35% when the shortest gaps are themselves jittery.
+3. **Score the folded gaps** with the same timing formula, then multiply by the share of gaps that fit. Traffic that only half lines up gets only half the credit.
+
+The higher of the plain and folded scores wins. The report then says roughly what share of expected check-ins was missing.
+
+Why this doesn't flag random traffic: random gaps rarely land near whole multiples of anything, so few of them fold and the multiplier keeps the score down. In the simulation study (docs/evaluation.md) it raised detection of beacons with 30% missed check-ins from under 10% to 78 to 100%, and added zero false positives across 1,500 non-beacon trials. `--no-fold` turns it off.
+
 ## 2. Size: does each check-in send about the same amount?
 
 A check-in that has nothing new to report sends the same small request every time. Using the bytes the source sent (`orig_bytes`):
