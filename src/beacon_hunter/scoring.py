@@ -71,6 +71,7 @@ class Timing:
     jitter: float               # spread of the gaps around the period, as a fraction
     missed: Optional[float]     # share of expected check-ins that never showed up (folded only)
     cycle: Optional[list[float]] = None   # the repeating gaps, when the timer is a cycle
+    coverage: float = 1.0       # share of the gaps this explanation accounts for
 
 
 @dataclass
@@ -87,6 +88,7 @@ class Finding:
     jitter: float
     missed: Optional[float]
     cycle: Optional[list[float]]
+    coverage: float
     median_bytes: Optional[float]
     same_size_share: Optional[float]
     active_slices: int
@@ -173,23 +175,34 @@ def merge_events(timestamps: Sequence[float], window: float) -> list[float]:
     return events
 
 
+def near(values: Sequence[float], target: float, tolerance: float = 0.10) -> float:
+    """Share of values within `tolerance` (a fraction) of target."""
+    if not values or target <= 0:
+        return 0.0
+    return sum(abs(v - target) <= tolerance * target for v in values) / len(values)
+
+
 def timing_score(intervals: Sequence[float]) -> float:
     return 0.7 * regularity(intervals) + 0.3 * symmetry(intervals)
 
 
 def symmetry(values: Sequence[float]) -> float:
-    """1 - |skew|, but only as far as there is real spread to be skewed.
+    """1 - |skew|, but only as far as the typical value actually varies.
 
-    On a near-perfect timer the quartiles sit milliseconds apart and their
-    "skew" is rounding noise, so the penalty is phased in as the middle half of
-    the values widens, reaching full weight at 10% of the median.
+    When most gaps are identical (a precise timer), two quartiles land on the
+    same value and quartile skew jumps to its extreme, +1 or -1, however few
+    outliers there are on one side. That would punish the most clockwork-like
+    traffic hardest. So the penalty is weighted by the median absolute
+    deviation: none for a spike of identical gaps, full weight once the typical
+    gap is 10% or more away from the median. Random traffic sits far above that,
+    so it always pays the full penalty.
     """
     if len(values) < 3:
         return 1.0
-    q1, q2, q3 = quantiles(values, n=4, method="inclusive")
-    if q2 <= 0 or q3 == q1:
+    m = median(values)
+    if m <= 0:
         return 1.0
-    weight = min(1.0, (q3 - q1) / q2 / 0.10)
+    weight = min(1.0, mad(values, m) / m / 0.10)
     return 1.0 - abs(bowley_skew(values)) * weight
 
 
@@ -231,6 +244,7 @@ def fold_onto_period(intervals: Sequence[float]) -> Optional[Timing]:
         period=period,
         jitter=mad(folded, period) / period,
         missed=(beats - len(folded)) / beats,
+        coverage=fit,
     )
 
 
@@ -268,21 +282,35 @@ def find_cycle(intervals: Sequence[float]) -> Optional[Timing]:
         score = timing_score(spans)
         if score < ON_A_TIMER:
             return None  # the gaps recur, but the cycle itself isn't steady enough to call a timer
-        return Timing(score, period, mad(spans, period) / period, None, pattern)
+        return Timing(score, period, mad(spans, period) / period, None, pattern, coverage=near(spans, period))
     return None
 
 
 def analyze_timing(intervals: Sequence[float], fold: bool = True, cycles: bool = True) -> Timing:
+    """Try each explanation of the gaps and keep the one that fits best.
+
+    A plain timer is tried first. Missed-check-in folding and cycle detection
+    are tried as alternatives; cycles only when the plain timer leaves a real
+    share of the gaps unexplained (otherwise summed gaps would make any jittery
+    timer look like a "cycle"). When two explanations score about the same,
+    the one that accounts for more of the gaps wins: a 5, 5, 50 s pattern is a
+    60-second cycle, not a 5-second timer that is usually right.
+    """
     m = median(intervals)
-    best = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None)
-    plain_is_a_timer = best.score >= ON_A_TIMER
+    best = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None,
+                  coverage=near(intervals, m))
     candidates = []
     if fold:
         candidates.append(fold_onto_period(intervals))
-    if cycles and not plain_is_a_timer:
+    if cycles and (best.score < ON_A_TIMER or best.coverage < 0.9):
         candidates.append(find_cycle(intervals))
     for candidate in candidates:
-        if candidate is not None and candidate.score > best.score:
+        if candidate is None:
+            continue
+        better = candidate.score > best.score + 0.02
+        as_good_but_explains_more = (candidate.score >= best.score - 0.02
+                                     and candidate.coverage >= best.coverage + 0.15)
+        if better or as_good_but_explains_more:
             best = candidate
     return best
 
@@ -372,6 +400,7 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
             jitter=timing.jitter,
             missed=timing.missed,
             cycle=timing.cycle,
+            coverage=timing.coverage,
             median_bytes=median(sizes) if sizes else None,
             same_size_share=_mode_share(sizes) if size is not None else None,
             active_slices=active,
@@ -414,7 +443,11 @@ def explain(f: Finding) -> list[str]:
     every = human_duration(f.period)
     # jitter is the median absolute deviation, so "half the gaps" is exact, not a guess.
     spread = f"half the gaps are within {f.jitter * 100:.0f}% of that"
-    if f.timing >= ON_A_TIMER:
+    if f.timing >= ON_A_TIMER and f.coverage < 0.9 and not f.cycle and not f.missed:
+        line = (f"checks in every {every} for {f.coverage * 100:.0f}% of gaps"
+                + ("; almost exactly" if f.jitter < 0.01 else "")
+                + "; the rest are shorter or longer")
+    elif f.timing >= ON_A_TIMER:
         line = f"checks in every {every}; " + ("almost exactly" if f.jitter < 0.01 else spread)
     elif f.timing >= 0.6:
         line = f"loosely periodic around {every}; {spread}"
