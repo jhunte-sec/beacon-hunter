@@ -5,8 +5,8 @@
 Finds malware "phoning home" in network logs. It spots machines that contact the same server on a timer, explains each one in plain English, and writes a one-file report you can attach to a ticket. It reads Zeek, Suricata, Sysmon, CSV exports and raw packet captures.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/report-dark.png">
-  <img alt="beacon-hunter report on a real malware capture: 2 pairs worth a look, a beacon map with one row per conversation, and a finding card explaining that the machine contacts its server every 80 seconds although the server never answers" src="docs/img/report-light.png" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/report-dark.png?v=5cda396c">
+  <img alt="beacon-hunter report on a real malware capture: 2 pairs worth a look, a beacon map with one row per conversation, and a finding card explaining that the machine contacts its server every 80 seconds although the server never answers" src="docs/img/report-light.png?v=dc62a5e3" width="760">
 </picture>
 
 <sub>The report above is from a real malware capture (IoT-23, Hakai botnet), not a mockup. Both of the malware's command servers come out on top, and the card explains what's going on: an attempt every 80 seconds, to servers that never answer.</sub>
@@ -16,8 +16,8 @@ Finds malware "phoning home" in network logs. It spots machines that contact the
 Once malware is on a machine, it has to check in with its operator for instructions. It usually does that on a timer, and a timer leaves a pattern in network logs that people browsing never do:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/beacon-vs-browsing-dark.svg">
-  <img alt="Two timelines over one hour: a person browsing makes connections at irregular moments, malware checking in makes one every five minutes" src="docs/img/beacon-vs-browsing-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/beacon-vs-browsing-dark.svg?v=a916c2ef">
+  <img alt="Two timelines over one hour: a person browsing makes connections at irregular moments, malware checking in makes one every five minutes" src="docs/img/beacon-vs-browsing-light.svg?v=f4ed51f2" width="760">
 </picture>
 
 ## Where the standard method breaks
@@ -25,13 +25,13 @@ Once malware is on a machine, it has to check in with its operator for instructi
 The usual test is simple: are the gaps between connections always the same? Real malware breaks it in two ways.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/missed-checkins-dark.svg">
-  <img alt="A one-minute timer that missed three check-ins: the gaps are whole multiples of one minute" src="docs/img/missed-checkins-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/missed-checkins-dark.svg?v=b0925c11">
+  <img alt="A one-minute timer that missed three check-ins: the gaps are whole multiples of one minute" src="docs/img/missed-checkins-light.svg?v=05191495" width="760">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/retries-dark.svg">
-  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; the operating system retries each one, and Zeek logs the retries as separate connections 7, 8, 17 and 48 seconds apart" src="docs/img/retries-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/retries-dark.svg?v=aac39bd2">
+  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; the operating system retries each one, and Zeek logs the retries as separate connections 7, 8, 17 and 48 seconds apart" src="docs/img/retries-light.svg?v=2ee0f138" width="760">
 </picture>
 
 The second one matters more than it looks. Command servers get taken down and sinkholed all the time, and the malware keeps calling anyway. Every unanswered call gets retried by the operating system, and the log turns a clean timer into noise.
@@ -43,15 +43,15 @@ beacon-hunter handles both. It folds missed check-ins back onto the timer, and i
 I tested it on [IoT-23](https://www.stratosphereips.org/datasets-iot23), a public dataset of real malware traffic where every connection is labeled:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/results-dark.svg">
-  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; a one-off download stays unflagged" src="docs/img/results-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/results-dark.svg?v=72384968">
+  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; a one-off download stays unflagged" src="docs/img/results-light.svg?v=414def6f" width="760">
 </picture>
 
 And in simulation, where the right answer is known exactly, missed check-ins stop being a problem:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/simulation-dark.svg">
-  <img alt="As more check-ins go missing, the standard method stops catching beacons while beacon-hunter keeps catching most of them" src="docs/img/simulation-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/simulation-dark.svg?v=418b2d15">
+  <img alt="As more check-ins go missing, the standard method stops catching beacons while beacon-hunter keeps catching most of them" src="docs/img/simulation-light.svg?v=b7c87afa" width="760">
 </picture>
 
 None of this made random traffic look like a beacon: 0 false alarms in 1,500 simulated samples. The full write-up, including what it **doesn't** catch and a correction I had to make along the way, is in [docs/evaluation.md](docs/evaluation.md).

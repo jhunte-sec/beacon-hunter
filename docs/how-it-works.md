@@ -27,8 +27,8 @@ Some implants open two or three connections per check-in. Counted separately, th
 ### Retries of one connection count once
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="img/retries-dark.svg">
-  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; the operating system retries each one, and Zeek logs the retries as separate connections" src="img/retries-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="img/retries-dark.svg?v=aac39bd2">
+  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; the operating system retries each one, and Zeek logs the retries as separate connections" src="img/retries-light.svg?v=2ee0f138" width="760">
 </picture>
 
 When a server doesn't answer a connection request (a SYN), the operating system sends it again on the same socket: Linux after 1, 3, 7, 15 and 31 seconds. Zeek starts a new log record once an unanswered SYN is more than 5 seconds old (its `tcp_SYN_timeout`), so a single attempt shows up as several "connections". Hakai's C2 makes one attempt every 80 seconds; in Zeek's log it becomes four records, 7, 8, 17 and 48 seconds apart, and the standard score drops to 0.65.
@@ -40,8 +40,8 @@ The packet-capture reader doesn't need this step: it sees the retransmitted SYNs
 ### Missed check-ins are folded back onto the timer
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="img/missed-checkins-dark.svg">
-  <img alt="A one-minute timer that missed three check-ins: the gaps are whole multiples of one minute" src="img/missed-checkins-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="img/missed-checkins-dark.svg?v=b0925c11">
+  <img alt="A one-minute timer that missed three check-ins: the gaps are whole multiples of one minute" src="img/missed-checkins-light.svg?v=05191495" width="760">
 </picture>
 
 Real beacons miss beats: a laptop sleeps, a packet drops. A 60-second timer then produces gaps like 60, 60, 120, 60, 180, and the regularity measure above reads that as irregular. So beacon-hunter also tries this:

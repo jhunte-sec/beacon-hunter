@@ -17,8 +17,8 @@ What changed as a result: retries of one connection are now counted once (they s
 ## 1. Simulation
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="img/simulation-dark.svg">
-  <img alt="As more check-ins go missing, the standard method stops catching beacons while beacon-hunter keeps catching most of them" src="img/simulation-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="img/simulation-dark.svg?v=418b2d15">
+  <img alt="As more check-ins go missing, the standard method stops catching beacons while beacon-hunter keeps catching most of them" src="img/simulation-light.svg?v=b7c87afa" width="760">
 </picture>
 
 `eval/simulate.py` generates 500 trials per row: beacons with 200 check-ins every 300 s, uniform jitter, and a share of check-ins dropped at random; timers that repeat a multi-step pattern; and three kinds of traffic that is *not* a beacon. Each row is the share of trials scored as a timer (timing score ≥ 0.8) by plain scoring (median absolute deviation and skew of the gaps, the textbook approach) and by beacon-hunter (plus missed-check-in folding and cycle detection; retry merging works on log records, so it has no role here).
@@ -58,13 +58,13 @@ What changed as a result: retries of one connection are now counted once (they s
 [IoT-23](https://www.stratosphereips.org/datasets-iot23) (Stratosphere Laboratory, CTU Prague, CC BY) contains Zeek logs of real malware running on a Raspberry Pi, with every connection labeled. Labels starting with `C&C` are the ground truth here. I used the seven malware captures and two benign devices whose logs are small enough to download individually.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="img/results-dark.svg">
-  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; a one-off download stays unflagged" src="img/results-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="img/results-dark.svg?v=72384968">
+  <img alt="Real command-and-control traffic: the standard method misses the Mirai and Hakai channels, beacon-hunter flags both; a one-off download stays unflagged" src="img/results-light.svg?v=414def6f" width="760">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="img/retries-dark.svg">
-  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; Zeek logs the operating system's retries as separate connections" src="img/retries-light.svg" width="760">
+  <source media="(prefers-color-scheme: dark)" srcset="img/retries-dark.svg?v=aac39bd2">
+  <img alt="Hakai malware makes one connection attempt every 80 seconds to a server that never answers; Zeek logs the operating system's retries as separate connections" src="img/retries-light.svg?v=2ee0f138" width="760">
 </picture>
 
 ### Per capture

@@ -362,9 +362,38 @@ def main() -> int:
             print(f"skipped {name}: needs the IoT-23 logs in eval/data/ (see eval/README.md)")
             continue
         for mode, theme in THEMES.items():
-            (OUT / f"{name}-{mode}.svg").write_text(draw(theme), encoding="utf-8")
+            (OUT / f"{name}-{mode}.svg").write_text(draw(theme), encoding="utf-8", newline="\n")
     print(f"wrote figures to {OUT}")
+    print(f"updated image links in {stamp_image_links()} files")
     return 0
+
+
+def stamp_image_links() -> int:
+    """Point every docs/img link at the file's current content: img/x.svg?v=<hash>.
+
+    Updated figures keep their file names, so browsers and GitHub's app happily
+    keep showing a copy they cached earlier. A link that changes whenever the
+    picture changes makes them fetch the new one.
+    """
+    import hashlib
+    import re
+
+    pattern = re.compile(r"((?:docs/)?img/([\w.-]+\.(?:svg|png)))(?:\?v=[0-9a-f]+)?")
+    changed = 0
+    for doc in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:
+        text = doc.read_text(encoding="utf-8")
+
+        def stamp(match):
+            image = OUT / match.group(2)
+            if not image.exists():
+                return match.group(0)
+            return f"{match.group(1)}?v={hashlib.sha1(image.read_bytes()).hexdigest()[:8]}"
+
+        new = pattern.sub(stamp, text)
+        if new != text:
+            doc.write_text(new, encoding="utf-8", newline="\n")
+            changed += 1
+    return changed
 
 
 if __name__ == "__main__":
