@@ -30,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allowlist", help="file of destinations to ignore (see examples/allowlist.txt)")
     p.add_argument("--no-fold", action="store_true",
                    help="score gaps at face value instead of forgiving missed check-ins")
+    p.add_argument("--no-cycles", action="store_true",
+                   help="don't look for repeating multi-step patterns")
     p.add_argument("--include-multicast", action="store_true", help="also score multicast and broadcast destinations")
     p.add_argument("--json", action="store_true", help="print JSON instead of a table")
     p.add_argument("--explain", action="store_true", help="after the table, write out the reasons for each result")
@@ -48,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         by_port=not args.no_port,
         include_multicast=args.include_multicast,
         fold=not args.no_fold,
+        cycles=not args.no_cycles,
     )
     if args.allowlist:
         try:

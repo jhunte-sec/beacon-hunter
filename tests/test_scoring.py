@@ -154,3 +154,39 @@ def test_known_timer_services_get_a_hint_but_keep_their_score():
     assert f.service_hint == "NTP time sync"
     assert f.score > 0.95
     assert any("usually NTP time sync" in r and "confirm 10.0.0.1" in r for r in f.reasons)
+
+
+def _cyclic_gaps(rng, pattern, jitter=0.05, n=400):
+    return [pattern[i % len(pattern)] * (1 + rng.uniform(-jitter, jitter)) for i in range(n)]
+
+
+def test_repeating_multi_step_cycle_is_found(rng):
+    # Shaped like a real retry loop seen in malware traffic: 7, 8.5, 17 and 48 s, repeat.
+    gaps = _cyclic_gaps(rng, [7.2, 8.5, 16.6, 47.9])
+    assert timing_score(gaps) < 0.7                   # gap by gap it looks scattered
+    timing = analyze_timing(gaps)
+    assert timing.score > 0.9
+    assert timing.cycle is not None and len(timing.cycle) == 4
+    assert abs(timing.period - 80.2) < 2
+    assert timing.cycle[-1] == max(timing.cycle)      # pattern ends on the long wait
+
+
+def test_random_traffic_never_looks_cyclic(rng):
+    for _ in range(50):
+        assert analyze_timing([rng.expovariate(1 / 60) for _ in range(300)]).cycle is None
+        assert analyze_timing([rng.uniform(10, 600) for _ in range(300)]).cycle is None
+
+
+def test_ordinary_jittered_timer_is_not_reported_as_a_cycle(rng):
+    gaps = [300 * (1 + rng.uniform(-0.2, 0.2)) for _ in range(300)]
+    assert analyze_timing(gaps).cycle is None
+
+
+def test_cycle_reason_spells_out_the_pattern():
+    times, t = [], 0.0
+    for i in range(200):
+        times.append(t)
+        t += [5.0, 5.0, 50.0][i % 3]
+    conns = [Conn(ts, "10.0.0.5", "203.0.113.50", 50, "tcp", 0) for ts in times]
+    reason = analyze(conns)[0].reasons[0]
+    assert reason.startswith("repeats a 3-connection cycle every 1m00s (waits 5s, 5s, 50s")

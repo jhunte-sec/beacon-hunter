@@ -41,6 +41,11 @@ KNOWN_TIMERS = {
 MAX_MULTIPLE = 4        # a gap of up to 4 periods can be explained as missed beats
 MIN_GAPS_TO_FOLD = 8
 
+# Repeating multi-step cycles (see find_cycle).
+MAX_CYCLE = 6           # longest cycle looked for, in connections
+CYCLE_MATCH = 0.85      # how closely each gap must match the gap k places later
+MIN_GAPS_FOR_CYCLE = 30 # don't claim a pattern from a handful of connections
+
 
 @dataclass
 class Settings:
@@ -50,6 +55,7 @@ class Settings:
     by_port: bool = True        # group by destination port as well as host
     include_multicast: bool = False
     fold: bool = True           # forgive missed check-ins (see fold_onto_period)
+    cycles: bool = True         # look for repeating multi-step patterns (see find_cycle)
     allow: list[allowlist.Entry] = field(default_factory=list)
 
 
@@ -59,6 +65,7 @@ class Timing:
     period: float               # the timer we think it's on, in seconds
     jitter: float               # spread of the gaps around the period, as a fraction
     missed: Optional[float]     # share of expected check-ins that never showed up (folded only)
+    cycle: Optional[list[float]] = None   # the repeating gaps, when the timer is a cycle
 
 
 @dataclass
@@ -74,6 +81,7 @@ class Finding:
     period: float
     jitter: float
     missed: Optional[float]
+    cycle: Optional[list[float]]
     median_bytes: Optional[float]
     same_size_share: Optional[float]
     active_slices: int
@@ -134,7 +142,23 @@ def merge_events(timestamps: Sequence[float], window: float) -> list[float]:
 
 
 def timing_score(intervals: Sequence[float]) -> float:
-    return 0.7 * regularity(intervals) + 0.3 * (1.0 - abs(bowley_skew(intervals)))
+    return 0.7 * regularity(intervals) + 0.3 * symmetry(intervals)
+
+
+def symmetry(values: Sequence[float]) -> float:
+    """1 - |skew|, but only as far as there is real spread to be skewed.
+
+    On a near-perfect timer the quartiles sit milliseconds apart and their
+    "skew" is rounding noise, so the penalty is phased in as the middle half of
+    the values widens, reaching full weight at 10% of the median.
+    """
+    if len(values) < 3:
+        return 1.0
+    q1, q2, q3 = quantiles(values, n=4, method="inclusive")
+    if q2 <= 0 or q3 == q1:
+        return 1.0
+    weight = min(1.0, (q3 - q1) / q2 / 0.10)
+    return 1.0 - abs(bowley_skew(values)) * weight
 
 
 def fold_onto_period(intervals: Sequence[float]) -> Optional[Timing]:
@@ -178,13 +202,57 @@ def fold_onto_period(intervals: Sequence[float]) -> Optional[Timing]:
     )
 
 
-def analyze_timing(intervals: Sequence[float], fold: bool = True) -> Timing:
+def recurrence(intervals: Sequence[float], k: int) -> float:
+    """How closely each gap matches the gap k places later (1.0 = exactly)."""
+    diffs = [abs(b - a) / max(a, b) for a, b in zip(intervals, intervals[k:]) if max(a, b) > 0]
+    return 1.0 - median(diffs) if diffs else 0.0
+
+
+def find_cycle(intervals: Sequence[float]) -> Optional[Timing]:
+    """Find a timer that repeats a pattern of several different gaps.
+
+    Some implants check in with a fixed sequence rather than a fixed gap, for
+    example a retry loop that waits 7, 8, 17 and 48 seconds and starts over.
+    Each gap on its own looks scattered, but every gap matches the one k places
+    later, and every k-th connection lands a constant time after the last. Both
+    are checked: the recurrence test keeps random traffic out (sums of random
+    gaps get smoother as k grows, recurrence does not), then the k-step spans
+    are scored as the timer.
+    """
+    if len(intervals) < MIN_GAPS_FOR_CYCLE:
+        return None
+    for k in range(2, MAX_CYCLE + 1):
+        if len(intervals) < 4 * k:
+            break
+        if recurrence(intervals, k) < CYCLE_MATCH:
+            continue
+        pattern = [median(intervals[phase::k]) for phase in range(k)]
+        if max(pattern) < 1.3 * min(pattern):
+            return None  # every step is the same length: an ordinary timer, not a cycle
+        longest = pattern.index(max(pattern))
+        pattern = pattern[longest + 1:] + pattern[: longest + 1]  # end on the long wait
+        spans = [sum(intervals[i:i + k]) for i in range(len(intervals) - k + 1)]
+        period = median(spans)
+        score = timing_score(spans)
+        if score < ON_A_TIMER:
+            return None  # the gaps recur, but the cycle itself isn't steady enough to call a timer
+        return Timing(score, period, mad(spans, period) / period, None, pattern)
+    return None
+
+
+def analyze_timing(intervals: Sequence[float], fold: bool = True, cycles: bool = True) -> Timing:
     m = median(intervals)
-    plain = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None)
-    folded = fold_onto_period(intervals) if fold else None
-    if folded is not None and folded.score > plain.score:
-        return folded
-    return plain
+    best = Timing(timing_score(intervals), m, mad(intervals, m) / m if m > 0 else 0.0, None)
+    plain_is_a_timer = best.score >= ON_A_TIMER
+    candidates = []
+    if fold:
+        candidates.append(fold_onto_period(intervals))
+    if cycles and not plain_is_a_timer:
+        candidates.append(find_cycle(intervals))
+    for candidate in candidates:
+        if candidate is not None and candidate.score > best.score:
+            best = candidate
+    return best
 
 
 def size_score(sizes: Sequence[int], connections: int) -> Optional[float]:
@@ -250,7 +318,7 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
         intervals = [b - a for a, b in zip(events, events[1:])]
         sizes = [c.orig_bytes for c in members if c.orig_bytes is not None]
 
-        timing = analyze_timing(intervals, settings.fold)
+        timing = analyze_timing(intervals, settings.fold, settings.cycles)
         size = size_score(sizes, len(members))
         active = active_slices(events, start, end, settings.slices)
         persistence = active / settings.slices
@@ -264,6 +332,7 @@ def analyze(conns: Iterable[Conn], settings: Optional[Settings] = None) -> list[
             period=timing.period,
             jitter=timing.jitter,
             missed=timing.missed,
+            cycle=timing.cycle,
             median_bytes=median(sizes) if sizes else None,
             same_size_share=_mode_share(sizes) if size is not None else None,
             active_slices=active,
@@ -309,6 +378,10 @@ def explain(f: Finding) -> list[str]:
         line = f"loosely periodic around {every}; {spread}"
     else:
         line = f"no clear timer: typical gap {every}, but half the gaps are more than {f.jitter * 100:.0f}% off"
+    if f.cycle:
+        steps = ", ".join(human_duration(g) for g in f.cycle)
+        line = (f"repeats a {len(f.cycle)}-connection cycle every {every} "
+                f"(waits {steps}, then starts over)")
     if f.missed:
         line += f"; about {f.missed * 100:.0f}% of expected check-ins are missing, but the rest stay on the timer"
     reasons.append(line)
