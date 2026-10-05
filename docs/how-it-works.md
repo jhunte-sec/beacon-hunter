@@ -22,6 +22,11 @@ Some implants open two or three connections per check-in. Counted separately, th
 
 ### Missed check-ins are folded back onto the timer
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/missed-checkins-dark.svg">
+  <img alt="A one-minute timer that missed three check-ins: the gaps are whole multiples of one minute" src="img/missed-checkins-light.svg" width="760">
+</picture>
+
 Real beacons miss beats: a laptop sleeps, a packet drops. A 60-second timer then produces gaps like 60, 60, 120, 60, 180, and the regularity measure above reads that as irregular. So beacon-hunter also tries this:
 
 1. **Estimate the base period** from the shortest gaps: the median of every gap up to 1.5 × the lower quartile.
@@ -33,6 +38,11 @@ The higher of the plain and folded scores wins. The report then says roughly wha
 Why this doesn't flag random traffic: random gaps rarely land near whole multiples of anything, so few of them fold and the multiplier keeps the score down. In the simulation study (docs/evaluation.md) it raised detection of beacons with 30% missed check-ins from under 10% to 78 to 100%, and added zero false positives across 1,500 non-beacon trials. `--no-fold` turns it off.
 
 ### Repeating cycles are found as a whole
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/cycle-dark.svg">
+  <img alt="Hakai malware's real retry loop: waits of 7, 8, 17 and 48 seconds repeat every 80 seconds" src="img/cycle-light.svg" width="760">
+</picture>
 
 Some implants don't wait a fixed time; they repeat a fixed *sequence*. Hakai's C2 in the IoT-23 captures waits 7.2, 8.5, 16.6 and 47.9 seconds, then starts over, 1,027 times. Each gap on its own looks scattered (timing 0.65), but two things give it away:
 

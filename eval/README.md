@@ -4,7 +4,7 @@
 |---|---|---|
 | `simulate.py` | simulated beacons and non-beacon traffic, plain vs beacon-hunter scoring | nothing |
 | `iot23.py` | ranks the labeled C&C pairs in IoT-23 malware captures | the logs below |
-| `plot.py` | redraws `docs/img/simulation.svg` and `docs/img/iot23.svg` | the logs, for the second figure |
+| `plot.py` | redraws every README figure in dark and light versions | the logs, for the two real-traffic figures |
 
 Results and discussion: [`docs/evaluation.md`](../docs/evaluation.md).
 

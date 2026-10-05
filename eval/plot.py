@@ -1,12 +1,17 @@
-"""Draw the two README figures as SVG, straight from the evaluation code.
+"""Draw the README figures, in a dark and a light version each.
 
-    python eval/plot.py            # needs eval/data/ for the IoT-23 figure
+    python eval/plot.py        # the results and cycle figures read eval/data/ (see eval/README.md)
 
-docs/img/simulation.svg   detection rate vs missed check-ins, three jitter levels
-docs/img/iot23.svg        timing score of each scorable C&C pair, plain vs beacon-hunter
+Writes to docs/img/:
 
-Emphasis form: beacon-hunter in the accent blue, plain scoring in gray. Light
-and dark palettes are both selected, so the images follow the viewer's theme.
+  beacon-vs-browsing-{dark,light}.svg   what a beacon looks like next to a person browsing
+  missed-checkins-{dark,light}.svg      problem 1: gaps that are whole multiples of the timer
+  cycle-{dark,light}.svg                problem 2: Hakai's real retry loop, from IoT-23
+  results-{dark,light}.svg              every scorable C&C channel in IoT-23, before and after
+  simulation-{dark,light}.svg           how detection holds up as check-ins go missing
+
+The README picks the version that matches the viewer's GitHub theme. Each SVG
+carries its own colours (no stylesheet), so it renders the same everywhere.
 """
 
 from __future__ import annotations
@@ -22,167 +27,308 @@ sys.path.insert(0, str(ROOT / "eval"))
 
 import iot23  # noqa: E402
 import simulate  # noqa: E402
-from beacon_hunter.scoring import ON_A_TIMER, Settings, analyze  # noqa: E402
+from beacon_hunter.scoring import Settings, analyze, merge_events  # noqa: E402
 
 OUT = ROOT / "docs" / "img"
-FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+DATA = ROOT / "eval" / "data"
+W = 760
+FONT = 'system-ui, -apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif'
 
-STYLE = f"""
-<style>
-  svg {{ --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781; --grid:#e1e0d9;
-         --axis:#c3c2b7; --accent:#2a78d6; --context:#898781; }}
-  @media (prefers-color-scheme: dark) {{
-    svg {{ --surface:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781; --grid:#2c2c2a;
-           --axis:#383835; --accent:#3987e5; --context:#898781; }}
-  }}
-  text {{ font-family:{FONT}; fill:var(--muted); font-size:12px; }}
-  .title {{ fill:var(--ink); font-size:15px; font-weight:600; }}
-  .sub {{ fill:var(--ink-2); font-size:12.5px; }}
-  .label {{ fill:var(--ink-2); font-size:12px; }}
-  .value {{ fill:var(--ink); font-size:12px; font-weight:600; }}
-  .grid {{ stroke:var(--grid); stroke-width:1; }}
-  .axis {{ stroke:var(--axis); stroke-width:1; }}
-  .accent {{ stroke:var(--accent); fill:var(--accent); }}
-  .context {{ stroke:var(--context); fill:var(--context); }}
-  .line {{ fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }}
-  .dot {{ stroke:var(--surface); stroke-width:2; }}
-</style>"""
+THEMES = {
+    "dark": dict(surface="#1a1a19", ink="#ffffff", ink2="#c3c2b7", muted="#898781", grid="#2c2c2a",
+                 axis="#4a4a46", accent="#3987e5", zone="#17304d", context="#898781",
+                 good="#0ca30c", bad="#d03b3b", glyph="#ffffff"),
+    "light": dict(surface="#fcfcfb", ink="#0b0b0b", ink2="#52514e", muted="#898781", grid="#e1e0d9",
+                  axis="#c3c2b7", accent="#2a78d6", zone="#dbe9fa", context="#898781",
+                  good="#0ca30c", bad="#d03b3b", glyph="#ffffff"),
+}
 
 
-def svg(width: int, height: int, body: str, label: str) -> str:
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            f'width="{width}" height="{height}" role="img" aria-label="{escape(label)}">'
-            f'{STYLE}<rect width="100%" height="100%" fill="var(--surface)" rx="8"/>{body}</svg>\n')
+# --------------------------------------------------------------- primitives
+
+class Canvas:
+    def __init__(self, theme: dict, height: int, label: str):
+        self.t, self.h, self.label, self.parts = theme, height, label, []
+
+    def add(self, svg: str) -> None:
+        self.parts.append(svg)
+
+    def text(self, x, y, s, size=12, color="ink2", weight=400, anchor="start"):
+        self.add(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" font-weight="{weight}" '
+                 f'fill="{self.t[color]}" text-anchor="{anchor}">{escape(str(s))}</text>')
+
+    def line(self, x1, y1, x2, y2, color="axis", width=1, dash=None, cap="butt"):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        self.add(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{self.t[color]}" '
+                 f'stroke-width="{width}" stroke-linecap="{cap}"{d}/>')
+
+    def dot(self, x, y, color, r=5):
+        self.add(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r}" fill="{self.t[color]}" '
+                 f'stroke="{self.t["surface"]}" stroke-width="2"/>')
+
+    def title(self, title, subtitle=None):
+        self.text(28, 40, title, size=17, color="ink", weight=600)
+        if subtitle:
+            self.text(28, 63, subtitle, size=13, color="ink2")
+
+    def verdict(self, x, y, ok: bool, bold: str, rest: str):
+        """A status mark with its label: never colour alone."""
+        c = self.t["good" if ok else "bad"]
+        g = self.t["glyph"]
+        if ok:
+            glyph = (f'<path d="M{x - 3.6:.1f},{y:.1f} l2.4,2.6 l4.8,-5.2" stroke="{g}" stroke-width="1.8" '
+                     f'fill="none" stroke-linecap="round" stroke-linejoin="round"/>')
+        else:
+            glyph = (f'<path d="M{x - 3:.1f},{y - 3:.1f} l6,6 M{x + 3:.1f},{y - 3:.1f} l-6,6" stroke="{g}" '
+                     f'stroke-width="1.8" stroke-linecap="round"/>')
+        self.add(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8" fill="{c}"/>{glyph}')
+        self.add(f'<text x="{x + 16:.1f}" y="{y + 4.5:.1f}" font-size="13" fill="{self.t["ink2"]}">'
+                 f'<tspan font-weight="600" fill="{self.t["ink"]}">{escape(bold)}</tspan> {escape(rest)}</text>')
+
+    def bracket(self, x1, x2, y, label, color="ink2"):
+        self.add(f'<path d="M{x1:.1f},{y + 5:.1f} V{y:.1f} H{x2:.1f} V{y + 5:.1f}" fill="none" '
+                 f'stroke="{self.t["muted"]}" stroke-width="1"/>')
+        self.text((x1 + x2) / 2, y - 7, label, size=12, color=color, anchor="middle")
+
+    def render(self) -> str:
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {self.h}" width="{W}" height="{self.h}" '
+                f'role="img" aria-label="{escape(self.label)}" font-family="{FONT}">'
+                f'<rect width="{W}" height="{self.h}" rx="10" fill="{self.t["surface"]}"/>'
+                + "".join(self.parts) + "</svg>\n")
 
 
-def legend(x: float, y: float) -> str:
-    return (f'<line x1="{x}" y1="{y}" x2="{x + 18}" y2="{y}" class="line accent"/>'
-            f'<text x="{x + 24}" y="{y + 4}" class="label">beacon-hunter</text>'
-            f'<line x1="{x + 130}" y1="{y}" x2="{x + 148}" y2="{y}" class="line context"/>'
-            f'<text x="{x + 154}" y="{y + 4}" class="label">plain timing score</text>')
+def ticks(c: Canvas, x0, x1, y, times, span, color="accent", height=13, width=2):
+    for t in times:
+        x = x0 + t / span * (x1 - x0)
+        c.line(x, y - height, x, y + height, color=color, width=width, cap="round")
 
 
-# ------------------------------------------------------------------ simulation
+# ------------------------------------------------------------------ figure 1
 
-def simulation_figure() -> str:
-    missed_levels = (0.0, 0.15, 0.3, 0.45)
-    panels = []
-    for jitter in (0.1, 0.2, 0.3):
-        plain, full = [], []
-        for missed in missed_levels:
-            gen = (lambda r, j=jitter, m=missed: simulate.beacon(r, j, m))
-            plain.append(simulate.rate(gen, False, random.Random(1)))
-            full.append(simulate.rate(gen, True, random.Random(1)))
-        panels.append((jitter, plain, full))
+def beacon_vs_browsing(theme: dict) -> str:
+    c = Canvas(theme, 300, "Two timelines over one hour: a person browsing makes connections at irregular "
+                           "moments, malware checking in makes one every five minutes")
+    c.title("A beacon is a program that checks in on a timer",
+            "One hour of connections from a laptop to two destinations. Each line is one connection.")
+    x0, x1, span = 220, 732, 60.0
 
-    W, H = 760, 354
-    left, top, pw, ph, gap = 56, 116, 200, 170, 28
-    body = [
-        f'<text x="24" y="32" class="title">Beacons that miss check-ins are still found</text>',
-        f'<text x="24" y="52" class="sub">Share of 500 simulated beacons called a timer, by how many check-ins were missed. '
-        f'Random traffic: 0% either way.</text>',
-        legend(24, 72),
-    ]
-    for n, (jitter, plain, full) in enumerate(panels):
-        x0 = left + n * (pw + gap)
-        body.append(f'<text x="{x0}" y="{top - 8}" class="label">±{jitter:.0%} jitter</text>')
-        for pct in (0, 0.5, 1.0):
-            y = top + ph - pct * ph
-            body.append(f'<line x1="{x0}" y1="{y:.1f}" x2="{x0 + pw}" y2="{y:.1f}" '
-                        f'class="{"axis" if pct == 0 else "grid"}"/>')
-            if n == 0:
-                body.append(f'<text x="{x0 - 8}" y="{y + 4:.1f}" text-anchor="end">{pct:.0%}</text>')
-        xs = [x0 + i / (len(missed_levels) - 1) * pw for i in range(len(missed_levels))]
-        for i, m in enumerate(missed_levels):
-            body.append(f'<text x="{xs[i]:.1f}" y="{top + ph + 18}" text-anchor="middle">{m:.0%}</text>')
-        for series, cls in ((plain, "context"), (full, "accent")):
-            pts = " ".join(f"{x:.1f},{top + ph - v * ph:.1f}" for x, v in zip(xs, series))
-            body.append(f'<polyline points="{pts}" class="line {cls}"/>')
-            for x, v in zip(xs, series):
-                body.append(f'<circle cx="{x:.1f}" cy="{top + ph - v * ph:.1f}" r="4" class="dot {cls}"/>')
-        # Label the point the story is about: 30% missed. The blue line arrives from the
-        # upper left and leaves to the lower right, so its label sits below-left; the
-        # gray one sits above-right, clear of its own steep drop.
-        yf = top + ph - full[2] * ph
-        yp = top + ph - plain[2] * ph
-        body.append(f'<text x="{xs[2] - 8:.1f}" y="{yf + 18:.1f}" text-anchor="end" class="value">{full[2]:.0%}</text>')
-        body.append(f'<text x="{xs[2] + 8:.1f}" y="{yp - 9:.1f}" class="label">{plain[2]:.0%}</text>')
-    body.append(f'<text x="{left + (3 * pw + 2 * gap) / 2}" y="{H - 14}" text-anchor="middle" class="label">'
-                f'check-ins missed</text>')
-    return svg(W, H, "".join(body), "Line charts: detection rate of simulated beacons as missed check-ins rise, "
-                                   "beacon-hunter versus plain scoring, at three jitter levels")
+    rng = random.Random(11)
+    browsing, t = [], 1.5
+    while t < 59:
+        burst = [t + rng.uniform(0, 0.6) for _ in range(rng.randint(2, 5))]
+        browsing += [b for b in burst if b < 59.5]
+        t = max(burst) + rng.expovariate(1 / 9)
+    beacon = [2.5 + 5 * i for i in range(12)]
+
+    rows = ((130, "A person browsing", "gaps all over the place", browsing, "context"),
+            (215, "Malware checking in", "the same gap, all day", beacon, "accent"))
+    for y, name, note, times, color in rows:
+        c.text(28, y - 3, name, size=14, color="ink", weight=600)
+        c.text(28, y + 15, note, size=12.5, color="muted")
+        c.line(x0, y + 14, x1, y + 14, color="axis")
+        ticks(c, x0, x1, y, times, span, color=color)
+
+    bx = lambda m: x0 + m / span * (x1 - x0)  # noqa: E731
+    c.bracket(bx(beacon[5]), bx(beacon[6]), 215 - 22, "5 min", color="ink")
+    for m in (0, 15, 30, 45, 60):
+        c.text(bx(m), 262, f"{m} min", size=11.5, color="muted", anchor="middle")
+    c.text(x0, 286, "beacon-hunter measures how regular the gaps are, for every pair of machines in your logs.",
+           size=12.5, color="ink2")
+    return c.render()
 
 
-# ----------------------------------------------------------------------- IoT-23
+# ------------------------------------------------------------------ figure 2
 
-def iot23_rows(data: Path):
-    """(label, detail, plain timing, beacon-hunter timing) per scorable C&C pair."""
-    found = []
-    for path in sorted(data.glob("*.labeled")):
+def missed_checkins(theme: dict) -> str:
+    c = Canvas(theme, 300, "A one-minute timer that missed three check-ins: the gaps are 1, 1, 1, 2, 1, 3, 1, 1, 1 "
+                           "minutes, all whole multiples of one minute")
+    c.title("Problem 1: real beacons miss check-ins",
+            "A laptop sleeps, a packet drops. Here a 1-minute timer misses 3 of its 13 check-ins.")
+    x0, x1, span, y = 60, 700, 12.0, 140
+    present = [0, 1, 2, 3, 5, 6, 9, 10, 11, 12]
+    missed = [4, 7, 8]
+    X = lambda m: x0 + m / span * (x1 - x0)  # noqa: E731
+
+    c.line(x0, y + 14, x1, y + 14, color="axis")
+    ticks(c, x0, x1, y, present, span, color="accent")
+    for m in missed:
+        c.line(X(m), y - 13, X(m), y + 13, color="muted", width=1.5, dash="3 3")
+    c.text(X(4), y - 24, "missed", size=12, color="muted", anchor="middle")
+    c.text(X(7.5), y - 24, "missed", size=12, color="muted", anchor="middle")
+
+    c.text(x0 - 12, y + 40, "gap", size=12, color="muted", anchor="end")
+    for a, b in zip(present, present[1:]):
+        gap = b - a
+        c.text((X(a) + X(b)) / 2, y + 40, f"{gap}m", size=12.5,
+               color="ink" if gap > 1 else "muted", weight=600 if gap > 1 else 400, anchor="middle")
+
+    c.verdict(36, 232, False, "Standard check:", "gaps of 1, 2 and 3 minutes look irregular, so it isn't flagged.")
+    c.verdict(36, 266, True, "beacon-hunter:", "every gap is a whole number of minutes. A 1-minute timer, 3 check-ins missed.")
+    return c.render()
+
+
+# ------------------------------------------------------------------ figure 3
+
+HAKAI = DATA / "CTU-IoT-Malware-Capture-8-1.conn.log.labeled"
+
+
+def hakai_times() -> list[float]:
+    """Nine consecutive real connections from Hakai's C2 retry loop, starting on a cycle."""
+    conns, _ = iot23.read_labeled(HAKAI)
+    ts = merge_events([x.ts for x in conns if x.dst == "128.185.250.50" and x.dport == 50], 1.0)
+    gaps = [b - a for a, b in zip(ts, ts[1:])]
+    start = next(i + 1 for i, g in enumerate(gaps[:50]) if g > 40)   # right after a long wait
+    window = ts[start:start + 9]
+    return [t - window[0] for t in window]
+
+
+def cycle(theme: dict) -> str:
+    times = hakai_times()
+    c = Canvas(theme, 320, "Real connections from Hakai malware to its command server: waits of 7, 8, 17 and "
+                           "48 seconds repeat, so every fourth connection is exactly 80 seconds apart")
+    c.title("Problem 2: some malware repeats a pattern, not a gap",
+            "Real traffic: Hakai malware retrying its command server (IoT-23 capture 8-1).")
+    x0, x1, y = 60, 700, 156
+    span = times[-1]
+    X = lambda t: x0 + t / span * (x1 - x0)  # noqa: E731
+
+    c.line(x0, y + 14, x1, y + 14, color="axis")
+    ticks(c, x0, x1, y, times, span, color="accent")
+    c.text(x0 - 12, y + 40, "wait", size=12, color="muted", anchor="end")
+    for a, b in zip(times, times[1:]):
+        c.text((X(a) + X(b)) / 2, y + 40, f"{b - a:.1f}s", size=11.5, color="ink2", anchor="middle")
+    for k in (0, 4):
+        c.bracket(X(times[k]), X(times[k + 4]), y - 26, f"{times[k + 4] - times[k]:.0f} seconds", color="ink")
+
+    c.verdict(36, 244, False, "Gap by gap:", "7, 8, 17, 48 seconds looks random. Standard score 0.65, not flagged.")
+    c.verdict(36, 278, True, "Cycle by cycle:", "80 seconds every time, 1,027 times in a row. beacon-hunter scores it 1.00.")
+    return c.render()
+
+
+# ------------------------------------------------------------------ figure 4
+
+def results_rows():
+    """Every scorable C&C channel in the IoT-23 captures, grouped by what it is."""
+    found = {}
+    for path in sorted(DATA.glob("CTU-IoT-*.labeled")):
         name = path.name.split(".")[0]
-        capture = name.rsplit("-", 2)[-2] + "-" + name.rsplit("-", 2)[-1]
         conns, labels = iot23.read_labeled(path)
         full = analyze(conns, Settings())
-        plain = {iot23.key(f): f for f in analyze(conns, Settings(fold=False, cycles=False))}
-        for f in full:
-            if iot23.key(f) in labels:
-                found.append((iot23.FAMILY[name], capture, f, plain[iot23.key(f)].timing))
+        plain = {iot23.key(f): f.timing for f in analyze(conns, Settings(fold=False, cycles=False))}
+        found[name] = [(f.timing, plain[iot23.key(f)]) for f in full if iot23.key(f) in labels]
 
-    rows, hakai = [], [r for r in found if r[0] == "Hakai"]
-    for family, capture, f, p in found:
-        if family == "Hakai":
-            continue
-        rows.append((f"{family} · {f.dst}:{f.dport}", f"capture {capture} · {f.connections:,} connections", p, f.timing))
-    if hakai:
-        # Two C2 servers, same retry loop, same scores: one row.
-        conns = " + ".join(f"{r[2].connections:,}" for r in hakai)
-        p = sum(r[3] for r in hakai) / len(hakai)
-        b = sum(r[2].timing for r in hakai) / len(hakai)
-        rows.append((f"Hakai · {len(hakai)} C2 servers :{hakai[0][2].dport}",
-                     f"capture {hakai[0][1]} · {conns} connections", p, b))
-    rows.sort(key=lambda r: -(r[3] - r[2]))
-    return rows
+    def avg(*names):
+        pairs = [p for n in names for p in found[f"CTU-IoT-Malware-Capture-{n}"]]
+        return (sum(p for _, p in pairs) / len(pairs), sum(f for f, _ in pairs) / len(pairs))
 
-
-def iot23_figure(data: Path) -> str:
-    rows = iot23_rows(data)
-    W = 760
-    left, right, top, row_h = 270, 60, 104, 44
-    H = top + row_h * len(rows) + 46
-    pw = W - left - right
-    xof = lambda v: left + v * pw  # noqa: E731
-    body = [
-        f'<text x="24" y="32" class="title">Real C&amp;C traffic from IoT-23 malware captures</text>',
-        f'<text x="24" y="52" class="sub">Timing score of every labeled C&amp;C pair with enough connections to judge.</text>',
-        legend(24, 72),
+    return [
+        ("Mirai botnet", "IRC command channel", *avg("34-1"), True, "Caught.", "Alternates 3 s and 7 s waits."),
+        ("Hakai botnet", "2 command servers", *avg("8-1"), True, "Caught.", "Repeats a 4-step, 80 s loop."),
+        ("Torii botnet", "command server, 2 captures", *avg("20-1", "21-1"), False,
+         "Not flagged.", "~15 connections, bursts hours apart."),
+        ("Mirai botnet", "malware download", *avg("44-1"), False, "Not a beacon.", "One burst of downloads."),
     ]
-    for v in (0, 0.25, 0.5, 0.75, 1.0):
-        body.append(f'<line x1="{xof(v):.1f}" y1="{top - 8}" x2="{xof(v):.1f}" y2="{H - 40}" '
-                    f'class="{"axis" if v == 0 else "grid"}"/>')
-        body.append(f'<text x="{xof(v):.1f}" y="{H - 22}" text-anchor="middle">{v:.2f}</text>')
-    tx = xof(ON_A_TIMER)
-    body.append(f'<line x1="{tx:.1f}" y1="{top - 14}" x2="{tx:.1f}" y2="{H - 40}" class="axis"/>'
-                f'<text x="{tx + 6:.1f}" y="{top - 4}" class="label">called a timer</text>')
-    for i, (label, detail, p, b) in enumerate(rows):
-        y = top + 16 + i * row_h
-        body.append(f'<text x="{left - 14}" y="{y + 4}" text-anchor="end" class="label">{escape(label)}</text>')
-        body.append(f'<text x="{left - 14}" y="{y + 18}" text-anchor="end">{escape(detail)}</text>')
-        if abs(b - p) > 0.005:
-            body.append(f'<line x1="{xof(p):.1f}" y1="{y}" x2="{xof(b):.1f}" y2="{y}" class="grid" stroke-width="2"/>')
-        body.append(f'<circle cx="{xof(p):.1f}" cy="{y}" r="5" class="dot context"/>')
-        body.append(f'<circle cx="{xof(b):.1f}" cy="{y}" r="5" class="dot accent"/>')
-        body.append(f'<text x="{xof(b) + 10:.1f}" y="{y + 4}" class="value">{b:.2f}</text>')
-    return svg(W, H, "".join(body), "Dot plot: timing score of each IoT-23 C&C pair, plain versus beacon-hunter")
+
+
+def results(theme: dict) -> str:
+    rows = results_rows()
+    top, row_h = 140, 62
+    bottom = top + row_h * len(rows) - 20
+    H = bottom + 82
+    c = Canvas(theme, H, "Real command-and-control traffic from IoT-23: the standard method misses the Mirai and "
+                         "Hakai channels, beacon-hunter flags both; Torii and a one-off download stay unflagged")
+    c.title("Tested on real malware traffic",
+            "How regular each command-and-control channel looks, from 0 (random) to 1 (clockwork).")
+    x0, x1 = 236, 520
+    X = lambda v: x0 + v * (x1 - x0)  # noqa: E731
+
+    c.add(f'<rect x="{X(0.8):.1f}" y="{top - 26}" width="{X(1.0) - X(0.8) + 10:.1f}" '
+          f'height="{bottom - top + 34}" rx="4" fill="{theme["zone"]}"/>')
+    c.text(X(0.9) + 5, top - 34, "flagged as a beacon", size=12, color="ink", weight=600, anchor="middle")
+    for v, lab in ((0, "0 · random"), (0.5, "0.5"), (1.0, "1 · clockwork")):
+        c.line(X(v), top - 26, X(v), bottom + 8, color="grid")
+        c.text(X(v), bottom + 26, lab, size=11.5, color="muted", anchor="middle")
+
+    c.dot(34, 92, "context", r=6)
+    c.text(47, 96.5, "standard method", size=12.5, color="ink2")
+    c.dot(176, 92, "accent", r=6)
+    c.text(189, 96.5, "beacon-hunter", size=12.5, color="ink2")
+
+    for i, (name, what, plain, full, caught, verdict, why) in enumerate(rows):
+        y = top + i * row_h
+        c.text(28, y + 4, name, size=14, color="ink", weight=600)
+        c.text(28, y + 22, what, size=12.5, color="muted")
+        if full - plain > 0.15:   # only draw an arrow for a real move
+            c.line(X(plain) + 8, y, X(full) - 10, y, color="muted", width=1.5)
+            tip = X(full) - 9
+            c.add(f'<path d="M{tip - 7:.1f},{y - 4.5:.1f} L{tip:.1f},{y:.1f} L{tip - 7:.1f},{y + 4.5:.1f}" '
+                  f'fill="none" stroke="{theme["muted"]}" stroke-width="1.5" stroke-linejoin="round"/>')
+        c.dot(X(plain), y, "context", r=6)
+        c.dot(X(full), y, "accent", r=6)
+        c.text(552, y + 4, verdict, size=13.5, color="ink" if caught else "ink2", weight=600)
+        c.text(552, y + 22, why, size=12, color="muted")
+
+    c.text(28, H - 22, "Not shown: 7 more C&C connections were one-off downloads or single long sessions. "
+                       "No timing method can see those.", size=12, color="muted")
+    return c.render()
+
+
+# ------------------------------------------------------------------ figure 5
+
+def simulation(theme: dict) -> str:
+    levels = (0.0, 0.15, 0.3, 0.45)
+    plain, full = [], []
+    for m in levels:
+        gen = (lambda r, m=m: simulate.beacon(r, 0.2, m))
+        plain.append(simulate.rate(gen, False, random.Random(1)))
+        full.append(simulate.rate(gen, True, random.Random(1)))
+
+    c = Canvas(theme, 360, "Line chart: as more check-ins go missing, the standard method stops catching "
+                           "beacons while beacon-hunter keeps catching most of them")
+    c.title("Missed check-ins break the standard method",
+            "Share of 500 simulated beacons caught (5-minute timer, ±20% jitter). Random traffic flagged: 0% for both.")
+    x0, x1, y0, y1 = 90, 560, 296, 104
+    X = lambda i: x0 + i / (len(levels) - 1) * (x1 - x0)  # noqa: E731
+    Y = lambda v: y0 - v * (y0 - y1)  # noqa: E731
+    for v in (0, 0.5, 1.0):
+        c.line(x0, Y(v), x1, Y(v), color="axis" if v == 0 else "grid")
+        c.text(x0 - 10, Y(v) + 4, f"{v:.0%}", size=11.5, color="muted", anchor="end")
+    for i, m in enumerate(levels):
+        c.text(X(i), y0 + 20, f"{m:.0%}", size=11.5, color="muted", anchor="middle")
+    c.text((x0 + x1) / 2, y0 + 44, "check-ins missed", size=12.5, color="ink2", anchor="middle")
+
+    for series, color in ((plain, "context"), (full, "accent")):
+        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(series))
+        c.add(f'<polyline points="{pts}" fill="none" stroke="{theme[color]}" stroke-width="2.5" '
+              f'stroke-linejoin="round" stroke-linecap="round"/>')
+        for i, v in enumerate(series):
+            c.dot(X(i), Y(v), color, r=5)
+
+    c.text(X(3) + 14, Y(full[3]) + 4, "beacon-hunter", size=13, color="ink", weight=600)
+    c.text(X(3) + 14, Y(plain[3]) + 4, "standard method", size=13, color="ink2", weight=600)
+    c.text(X(2) - 12, Y(full[2]) + 22, f"{full[2]:.0%} caught", size=13, color="ink", weight=600, anchor="end")
+    c.text(X(2) + 12, Y(plain[2]) - 10, f"{plain[2]:.0%}", size=13, color="ink2", weight=600)
+    return c.render()
+
+
+FIGURES = {
+    "beacon-vs-browsing": (beacon_vs_browsing, False),
+    "missed-checkins": (missed_checkins, False),
+    "cycle": (cycle, True),
+    "results": (results, True),
+    "simulation": (simulation, False),
+}
 
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "simulation.svg").write_text(simulation_figure(), encoding="utf-8")
-    data = ROOT / "eval" / "data"
-    if any(data.glob("*.labeled")):
-        (OUT / "iot23.svg").write_text(iot23_figure(data), encoding="utf-8")
-    else:
-        print("eval/data/ is empty; skipped the IoT-23 figure (see eval/README.md)")
+    have_data = HAKAI.exists()
+    for name, (draw, needs_data) in FIGURES.items():
+        if needs_data and not have_data:
+            print(f"skipped {name}: needs the IoT-23 logs in eval/data/ (see eval/README.md)")
+            continue
+        for mode, theme in THEMES.items():
+            (OUT / f"{name}-{mode}.svg").write_text(draw(theme), encoding="utf-8")
     print(f"wrote figures to {OUT}")
     return 0
 
